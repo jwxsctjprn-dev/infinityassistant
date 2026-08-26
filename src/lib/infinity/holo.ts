@@ -266,8 +266,13 @@ export function parseHoloSpec(raw: string, fallbackName: string): HoloSpec {
     });
   }
   if (parts.length === 0) throw new Error("The model plan had no usable parts.");
+  return normalizeHoloSpec(name, parts);
+}
 
-  // --- normalize: center + uniform fit --------------------------------------
+/** Center on the origin and scale so the largest dimension ≈ 2.3 units. */
+export function normalizeHoloSpec(name: string, parts: HoloPart[]): HoloSpec {
+  if (parts.length === 0) throw new Error("The model plan had no usable parts.");
+
   let minX = Infinity, minY = Infinity, minZ = Infinity;
   let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
   for (const p of parts) {

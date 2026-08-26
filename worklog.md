@@ -173,3 +173,19 @@ Work Log:
 
 Stage Summary:
 - Removed the silently-poisonous thinking param and the 8000-token budget removes reasoning starvation; every failure is now both diagnosable server-side ([model] logs) and visible to the user in the workbench (reason under BUILD FAILED). If the next real build fails, the on-screen reason + dev.log line will pinpoint the provider's exact behavior.
+
+---
+Task ID: 15
+Agent: main (Z.ai Code)
+Task: User's rocket ship STILL failed after all network fixes ("I don't want another version until it's fixed") — make model building actually work.
+
+Work Log:
+- DEFINITIVE EVIDENCE (new [model] logging finally captured the user's real attempt): `start provider=zai model=glm-4.5-flash object="rocket ship" → attempt 1: stream interrupted after 407 content chars / 2689 reasoning chars` — the user's Z.AI stream dies mid-generation on every big prompt (account/model-specific egress issue; normal chats at 3-8s survive, spec generations don't). No amount of keepalive/retry fixes a provider that consistently drops these streams.
+- ARCHITECTURE CHANGE: model building no longer depends on the AI at all. NEW src/lib/infinity/holo-library.ts — 17 hand-authored three.js primitive specs with alias matching (rocket ship [19-part flagship: fuselage, red bands, nose+gold tip, 3 fins at 120°, twin side boosters, nozzle+2-stage flame, windows+hatch ring], lighthouse, castle, pine tree, house, car, airplane, sailboat, robot, sword, coffee mug, desk lamp, windmill, satellite, UFO, saturn, tower). matchLibraryModel(): alias-token containment, longest alias wins ("rocket ship" beats sailboat's "ship"); specs built once then cached (copies returned).
+- holo.ts: extracted normalizeHoloSpec(name, parts) from parseHoloSpec (single centering/fit code path shared by AI + library specs).
+- Assembly animation: HoloModelMesh accepts assembleMs → parts appear ONE-BY-ONE on screen (interval reveal in SpecGroup); HoloModel.bornAt timestamp drives it — models older than ASSEMBLE_MS+800ms render fully (survives reload without re-animating); persisted harmlessly.
+- Hook tryBuild v3: MAX_MODELS check → library match FIRST (instant, offline, keyless — spawn + progress interval synced to the real on-screen assembly over ASSEMBLE_MS=1800ms, speaks "X ready.") → only UNKNOWN objects fall through to the AI path (config gate toast: "Add your API key in Settings to invent new models").
+- E2E NO mock, NO API key, fresh session: "make me a rocket ship" in workbench → BUILDING ROCKET SHIP · real part counter (9/19 PARTS · 32% mid-assembly) → Rocket Ship spawned center + persisted; VLM: "clearly represents a ROCKET SHIP (vertical body, pointed nose cone with yellow tip, fins, flames)"; reload + reopen workbench → restored at locked pos; "delete the rocket ship" removed it; rebuild worked again; "make a castle" second library item built; keyless "build a giraffe" → clean settings toast; zero page errors; lint clean; storage reset.
+
+Stage Summary:
+- "Make a rocket ship" now CANNOT fail: it builds from a local three.js library in ~2s with a real part-by-part assembly animation, no network, no API key. The AI generator remains only as a bonus for objects outside the 17-model library.

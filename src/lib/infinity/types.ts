@@ -91,6 +91,8 @@ export interface HoloModel {
   spec: HoloSpec;
   pos: { x: number; y: number };
   rot: { x: number; y: number };
+  /** Timestamp of creation — fresh models assemble part-by-part on screen. */
+  bornAt?: number;
 }
 
 export const DEFAULT_SYSTEM_PROMPT =

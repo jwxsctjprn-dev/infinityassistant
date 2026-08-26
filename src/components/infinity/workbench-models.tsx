@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { HoloModelMesh } from "./holo-model-mesh";
 import { useInfinity } from "@/lib/infinity/settings";
+import { ASSEMBLE_MS } from "@/lib/infinity/holo-library";
 import type { HoloModel } from "@/lib/infinity/types";
 
 export type BuildPhase = "building" | "done" | "error";
@@ -199,7 +200,15 @@ function ModelCard({ model }: { model: HoloModel }) {
         aria-hidden
         className="absolute inset-x-[8%] bottom-[6%] h-[14%] rounded-[50%] bg-sky-400/10 blur-md"
       />
-      <HoloModelMesh spec={model.spec} rot={model.rot} />
+      <HoloModelMesh
+        spec={model.spec}
+        rot={model.rot}
+        assembleMs={
+          model.bornAt && Date.now() - model.bornAt < ASSEMBLE_MS + 800
+            ? ASSEMBLE_MS
+            : undefined
+        }
+      />
       <span
         aria-hidden
         className={`absolute -bottom-1 left-1/2 -translate-x-1/2 whitespace-nowrap text-[9px] font-light uppercase tracking-[0.3em] transition-opacity ${

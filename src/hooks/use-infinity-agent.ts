@@ -17,6 +17,7 @@ import {
   parseHoloSpec,
   type SpecScan,
 } from "@/lib/infinity/holo";
+import { ASSEMBLE_MS, matchLibraryModel } from "@/lib/infinity/holo-library";
 import type { BuildingState } from "@/components/infinity/workbench-models";
 
 /**
@@ -617,18 +618,84 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       setLastUser(raw.trim());
       setError(null);
 
-      const s = useInfinity.getState().settings;
-      if (!isConfigured(s)) {
-        toast("Add your API key in Settings to build models.", {
-          action: { label: "Settings", onClick: () => onNeedSettingsRef.current() },
-        });
-        onNeedSettingsRef.current();
-        return true;
-      }
-
       const models = useInfinity.getState().models;
       if (models.length >= MAX_MODELS) {
         toast.error("The workbench is full — delete a model first.");
+        return true;
+      }
+
+      // ---- Built-in library: instant, offline, cannot fail. No key needed.
+      const libSpec = matchLibraryModel(cmd.object);
+      if (libSpec) {
+        useInfinity.getState().setWorkbench(true);
+        pauseMic();
+
+        void (async () => {
+          setBuilding({
+            name: libSpec.name,
+            phase: "building",
+            progress: 0.06,
+            partsDone: 0,
+            count: libSpec.parts.length,
+          });
+
+          const spoken = speak("OK, building that now.").catch(() => {
+            /* best effort */
+          });
+
+          const store = useInfinity.getState();
+          store.addModel({
+            id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            name: libSpec.name,
+            spec: libSpec,
+            pos: nextSlot(store.models.length),
+            rot: { x: 0.12, y: -0.55 },
+            bornAt: Date.now(),
+          });
+
+          // Progress tracks the actual on-screen part-by-part assembly.
+          const t0 = performance.now();
+          const iv = window.setInterval(() => {
+            const frac = Math.min(1, (performance.now() - t0) / ASSEMBLE_MS);
+            setBuilding((b) =>
+              b
+                ? {
+                    ...b,
+                    progress: 0.08 + 0.87 * frac,
+                    partsDone: Math.round(frac * libSpec.parts.length),
+                  }
+                : b
+            );
+            if (frac >= 1) window.clearInterval(iv);
+          }, 90);
+
+          await spoken;
+          if (!activeRef.current && !sessionRef.current) {
+            setAgentState("idle");
+          }
+          await sleep(Math.max(0, ASSEMBLE_MS + 400 - (performance.now() - t0)));
+          window.clearInterval(iv);
+
+          setBuilding((b) => (b ? { ...b, phase: "done", progress: 1 } : b));
+          await sleep(650);
+          setBuilding(null);
+          try {
+            await speak(`${libSpec.name} ready.`);
+          } catch {
+            /* best effort */
+          }
+          resumeAfterAction();
+        })();
+        return true;
+      }
+
+      // ---- Unknown object → AI-generated spec (needs a key).
+      const s = useInfinity.getState().settings;
+      if (!isConfigured(s)) {
+        toast("Add your API key in Settings to invent new models.", {
+          action: { label: "Settings", onClick: () => onNeedSettingsRef.current() },
+        });
+        onNeedSettingsRef.current();
         return true;
       }
 

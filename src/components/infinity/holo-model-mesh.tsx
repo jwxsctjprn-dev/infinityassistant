@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import type { HoloPart, HoloSpec } from "@/lib/infinity/types";
@@ -61,12 +61,32 @@ function SpecGroup({
   spec,
   rot,
   subtle,
+  assembleMs,
 }: {
   spec: HoloSpec;
   rot: { x: number; y: number };
   subtle: boolean;
+  assembleMs?: number;
 }) {
   const group = useRef<THREE.Group>(null);
+  const [visible, setVisible] = useState(assembleMs ? 1 : spec.parts.length);
+
+  // Fresh builds assemble part-by-part: real, watchable construction.
+  useEffect(() => {
+    if (!assembleMs) return;
+    const per = Math.max(40, assembleMs / spec.parts.length);
+    const iv = setInterval(() => {
+      setVisible((v) => {
+        if (v >= spec.parts.length) {
+          clearInterval(iv);
+          return v;
+        }
+        return v + 1;
+      });
+    }, per);
+    return () => clearInterval(iv);
+  }, [assembleMs, spec.parts.length]);
+
   useFrame((state) => {
     if (!group.current) return;
     // user rotation + gentle idle bob (doesn't move the locked position)
@@ -76,7 +96,7 @@ function SpecGroup({
   });
   return (
     <group ref={group}>
-      {spec.parts.map((p, i) => (
+      {spec.parts.slice(0, visible).map((p, i) => (
         <PartMesh key={i} part={p} />
       ))}
     </group>
@@ -88,10 +108,13 @@ export function HoloModelMesh({
   spec,
   rot,
   subtleBob = true,
+  assembleMs,
 }: {
   spec: HoloSpec;
   rot: { x: number; y: number };
   subtleBob?: boolean;
+  /** When set, parts appear one-by-one over this duration (fresh builds). */
+  assembleMs?: number;
 }) {
   return (
     <Canvas
@@ -102,7 +125,7 @@ export function HoloModelMesh({
     >
       <ambientLight intensity={0.5} />
       <directionalLight position={[3, 5, 4]} intensity={1.1} color="#bfe3ff" />
-      <SpecGroup spec={spec} rot={rot} subtle={subtleBob} />
+      <SpecGroup spec={spec} rot={rot} subtle={subtleBob} assembleMs={assembleMs} />
     </Canvas>
   );
 }

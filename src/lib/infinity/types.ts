@@ -1,0 +1,65 @@
+/**
+ * Infinity — shared types used by both the frontend and the API routes.
+ */
+
+export type ProviderId = "zai" | "groq" | "openai" | "custom";
+
+export interface Settings {
+  provider: ProviderId;
+  apiKey: string;
+  /** Optional override for custom OpenAI-compatible endpoints, e.g. "http://localhost:11434/v1" */
+  baseUrl: string;
+  model: string;
+  /** Microsoft Edge TTS voice short name, e.g. "en-US-AriaNeural" */
+  voice: string;
+  /** Speech rate multiplier 0.5 – 1.5 */
+  rate: number;
+  /** Show subtle live captions under the orb */
+  captions: boolean;
+  /** Optional persona override */
+  systemPrompt: string;
+}
+
+export interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+/** POST /api/chat body */
+export interface ChatRequestBody {
+  provider: ProviderId;
+  apiKey: string;
+  baseUrl?: string;
+  model: string;
+  messages: ChatMessage[];
+  systemPrompt?: string;
+}
+
+/** POST /api/chat response (success) */
+export interface ChatResponseBody {
+  ok: true;
+  reply: string;
+  model: string;
+}
+
+/** POST /api/chat response (error) */
+export interface ChatErrorBody {
+  ok: false;
+  error: string;
+}
+
+/** POST /api/tts body */
+export interface TtsRequestBody {
+  text: string;
+  voice?: string;
+  rate?: number;
+}
+
+export type AgentState = "idle" | "listening" | "thinking" | "speaking";
+
+export const DEFAULT_SYSTEM_PROMPT =
+  "You are Infinity, a warm, witty voice companion having a natural spoken conversation with the user. " +
+  "Your replies are heard out loud, so keep them short and conversational — usually 1–3 sentences. " +
+  "Use casual, human phrasing. Avoid markdown, lists, emojis, or special symbols. " +
+  "Ask a follow-up question when it feels natural, remember what was said earlier, " +
+  "match the user's energy, and be genuine. If asked what you are, say you're Infinity.";

@@ -127,3 +127,20 @@ Work Log:
 
 Stage Summary:
 - Full build→progress→spawn→drag/rotate-lock→persist→delete loop shipped and E2E-verified. Real-LLM spec quality depends on user's model (glm-4.6/gpt-4o etc. handle JSON specs well).
+
+---
+Task ID: 12
+Agent: main (Z.ai Code)
+Task: Fix "string did not match expected pattern" build failure + replace fake progress bar with real-time progress tied to actual generation.
+
+Work Log:
+- ROOT CAUSE (dev.log): `POST /api/chat 502 in 45s` — spec generation (max_tokens 3000) regularly exceeds the route's fixed 45s AbortSignal; the preview gateway then serves its own HTML error page, and the client's blind `res.json()` rejects with WebKit's raw "The string did not match the pattern expected." Secondary: provider output truncated by max_tokens broke JSON.parse in parseHoloSpec the same way.
+- NEW /api/model streaming route (src/app/api/model/route.ts): NDJSON events {"t":"open"|"delta"|"done"|"error"}; open event enqueued IMMEDIATELY (gateway never idles), 60s budget to provider first byte, then 35s IDLE watchdog reset on every chunk (slow-but-alive builds never killed), 300s hard cap, provider SSE parsing (data:/[DONE]/finish_reason), client-disconnect abort, pre-stream validation errors as normal JSON.
+- holo.ts v2: MODEL_GEN_SYSTEM now emits {"name","count","parts":[...]} with count BEFORE parts (enables true progress) + ≤2 decimals + 10–26 parts; parseHoloSpec repair chain: strict parse → fence-strip parse → repairTruncated (cut at last complete part, close ]}) → salvageParts (keep every individually-complete part object); clean error "The model plan came back incomplete — try building it again."; NEW createSpecStreamScanner() live brace-depth scanner reporting partsSeen/count/name/chars per delta.
+- Agent hook: safeJson() helper (text-first parse, friendly errors — kills the raw-SyntaxError class for ALL fetches incl. askChat); askSpec → streamSpec (reads NDJSON stream, feeds scanner); tryBuild: bar appears instantly, generation starts IN PARALLEL with "OK, building that now." speech, progress target = 0.10+0.78*(partsSeen/max(count,partsSeen)) (chars-based heuristic capped 78% when count absent), 0.92 at stream end, 1.0 on spawn; throttled 120ms updates.
+- BuildProgress UI: renders real progress only (eases toward real targets, never invents completion); label BUILDING X / X READY / BUILD FAILED; meta line "N/M PARTS · P%" or "CONNECTING"; fake crawl-to-90% deleted.
+- workbench.ts: matchBuildCommand(input, inWorkbench) — inside workbench "build a cube"/"make me a sandcastle" work without the word "model" (NON_BUILD_WORDS blocklist stops edit-style requests like "make it bigger"/"make the cube red"); outside workbench unchanged (no conversation hijacking).
+- E2E via temp in-app mock OpenAI-compatible STREAMING endpoint (/api/mockv1 — deleted after): curl verified NDJSON open→delta×N→done; unit-tested parser (valid/truncated/fenced/garbage + scanner counts); browser: lighthouse build showed REAL mid-stream progress ("9/14 PARTS · 55%", later "4/14 PARTS · 25%" on second build), model spawned centered + persisted (14 parts), VLM confirmed wireframe lighthouse on clean grid; truncated spec salvaged into "Salvaged Skiff" (7 parts kept, cut part dropped); garbage stream → clean readable error + "I couldn't build that." (no pattern error, zero page errors); reload + "open workbench" → both models restored (positions locked); "build a cube" (no "model") intercepted inside workbench; storage reset for fresh first-run; bun run lint clean; dev.log healthy (POST /api/model 200 streaming, no 500s).
+
+Stage Summary:
+- Builds now stream end-to-end: no timeout wall, no raw JSON SyntaxErrors (safe parse + truncated-output repair/salvage), and the progress bar tracks ACTUAL completed parts in real time with an N/M PARTS readout.

@@ -41,29 +41,55 @@ export interface BuildCommand {
 
 const BUILD_VERB_RE = /\b(build|create|make|generate|construct|design|assemble)\b/;
 
+/** Words that mean the user wants to EDIT/tweak, not build something new. */
+const NON_BUILD_WORDS = new Set([
+  "it", "this", "that", "them", "bigger", "smaller", "larger", "taller", "shorter",
+  "red", "blue", "green", "yellow", "purple", "orange", "white", "black", "pink",
+  "brighter", "darker", "faster", "slower", "spin", "spinning", "rotate", "turn",
+  "move", "shift", "delete", "remove", "clear", "destroy", "workbench", "model",
+]);
+
 /**
  * "build a model of a lighthouse" / "create a 3d model of a treehouse" /
  * "make me a castle model" → { object: "lighthouse" | ... }
+ *
+ * Inside the workbench, the word "model" is optional: "build a cube",
+ * "make me a sandcastle" also count. Outside it, "model" is required so
+ * everyday conversation is never hijacked.
  */
-export function matchBuildCommand(input: string): BuildCommand | null {
+export function matchBuildCommand(input: string, inWorkbench = false): BuildCommand | null {
   const t = input
     .toLowerCase()
     .trim()
     .replace(/[^a-z0-9\s]/g, "")
     .replace(/\s+/g, " ");
-  if (!/\bmodel\b/.test(t)) return null;
-  if (!BUILD_VERB_RE.test(t)) return null;
 
   let object = "";
-  let m = t.match(/\bmodel\s+of\s+(.+)$/);
-  if (m) {
-    object = m[1];
-  } else {
-    m = t.match(
-      /\b(?:build|create|make|generate|construct|design|assemble)\s+(?:me\s+)?(?:a|an|the|some)?\s*(.+?)\s+model(?:\s+of\s+(.+))?$/
+
+  if (/\bmodel\b/.test(t) && BUILD_VERB_RE.test(t)) {
+    let m = t.match(/\bmodel\s+of\s+(.+)$/);
+    if (m) {
+      object = m[1];
+    } else {
+      m = t.match(
+        /\b(?:build|create|make|generate|construct|design|assemble)\s+(?:me\s+)?(?:a|an|the|some)?\s*(.+?)\s+model(?:\s+of\s+(.+))?$/
+      );
+      if (m) object = m[2] || m[1] || "";
+    }
+  } else if (
+    inWorkbench &&
+    BUILD_VERB_RE.test(t) &&
+    t.split(" ").length <= 5 &&
+    !/\b(workbench|delete|remove|clear)\b/.test(t)
+  ) {
+    // "build a cube" / "make me a sandcastle" (no "model" word needed)
+    const m = t.match(
+      /\b(?:build|create|make|generate|construct|design|assemble)\s+(?:me\s+)?(?:a|an|the|some)?\s*(.+)$/
     );
-    if (m) object = m[2] || m[1] || "";
+    if (m) object = m[1] || "";
+    if (object && object.split(" ").some((w) => NON_BUILD_WORDS.has(w))) object = "";
   }
+
   if (!object) return null;
 
   object = object

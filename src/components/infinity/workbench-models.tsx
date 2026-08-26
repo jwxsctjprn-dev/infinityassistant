@@ -11,14 +11,29 @@ export type BuildPhase = "building" | "done" | "error";
 export interface BuildingState {
   name: string;
   phase: BuildPhase;
+  /** Real completion target 0..1, derived from live stream events. */
+  progress: number;
+  /** Parts completed so far (from the stream scanner). */
+  partsDone: number;
+  /** Declared total parts, once the model has streamed its "count". */
+  count: number | null;
 }
 
 /* ------------------------------------------------------------------ */
-/* Progress bar                                                         */
+/* Progress bar — driven by REAL generation events                      */
+/* (each completed part in the streamed spec bumps the target; the bar  */
+/*  only ever eases toward real targets, never invents completion)      */
 /* ------------------------------------------------------------------ */
 
 function BuildProgress({ building }: { building: BuildingState }) {
-  const [pct, setPct] = useState(3);
+  const [disp, setDisp] = useState(2);
+  const targetRef = useRef(building.progress);
+  const phaseRef = useRef(building.phase);
+
+  useEffect(() => {
+    targetRef.current = building.progress;
+    phaseRef.current = building.phase;
+  }, [building.progress, building.phase]);
 
   useEffect(() => {
     let raf = 0;
@@ -26,21 +41,29 @@ function BuildProgress({ building }: { building: BuildingState }) {
     const tick = (t: number) => {
       const dt = Math.min(0.1, (t - last) / 1000);
       last = t;
-      setPct((prev) => {
-        if (building.phase === "done") return Math.min(100, prev + dt * 140);
-        if (building.phase === "error") return prev;
-        const target = 90;
-        // ease-out crawl toward 90 while the AI is generating
-        const next = prev + Math.max(dt * 9, (target - prev) * dt * 0.55);
-        return Math.min(target, next);
+      setDisp((prev) => {
+        const target = targetRef.current * 100;
+        if (prev >= target) return prev;
+        // ease toward the real target; small linear floor so it always moves
+        const speed = phaseRef.current === "done" ? 6 : 3.2;
+        return Math.min(target, prev + Math.max((target - prev) * dt * speed, dt * 6));
       });
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [building.phase]);
+  }, []);
 
   const failed = building.phase === "error";
+  const done = building.phase === "done";
+  const pct = Math.round(disp);
+  const meta = failed
+    ? ""
+    : building.count !== null
+      ? `${Math.min(building.partsDone, building.count)}/${building.count} PARTS · ${pct}%`
+      : disp < 8
+        ? "CONNECTING"
+        : `${pct}%`;
 
   return (
     <motion.div
@@ -57,21 +80,25 @@ function BuildProgress({ building }: { building: BuildingState }) {
           failed ? "text-red-400/80" : "text-sky-300/70"
         }`}
       >
-        {failed ? "BUILD FAILED" : `BUILDING ${building.name.toUpperCase()}`}
+        {failed
+          ? "BUILD FAILED"
+          : done
+            ? `${building.name.toUpperCase()} READY`
+            : `BUILDING ${building.name.toUpperCase()}`}
       </p>
       <div className="h-[3px] w-full overflow-hidden rounded-full bg-white/10">
         <div
-          className={`h-full rounded-full transition-none ${
+          className={`h-full rounded-full ${
             failed
               ? "bg-red-400/70"
               : "bg-gradient-to-r from-sky-500/60 via-sky-300 to-cyan-200"
           }`}
-          style={{ width: `${pct}%`, boxShadow: "0 0 12px rgba(103, 232, 249, 0.45)" }}
+          style={{ width: `${disp}%`, boxShadow: "0 0 12px rgba(103, 232, 249, 0.45)" }}
         />
       </div>
       {!failed && (
-        <p className="mt-2 text-center font-mono text-[10px] text-sky-200/40">
-          {Math.round(pct)}%
+        <p className="mt-2 text-center font-mono text-[10px] tracking-widest text-sky-200/40">
+          {meta}
         </p>
       )}
     </motion.div>

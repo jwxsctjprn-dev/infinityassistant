@@ -16,10 +16,11 @@
  *   - keepalive pings every 5s so no gateway can idle-kill the connection
  *   - 150s budget for the provider's FIRST byte (thinking/queue time)
  *   - 35s idle watchdog DURING the stream (reset by every provider chunk)
- *   - up to 3 attempts on transient failures (network, 429/5xx, empty stream)
- *     — only retried while nothing has been forwarded to the client
- *   - zai: asks GLM to skip deep thinking for structured output; if the
- *     endpoint rejects the parameter (HTTP 400), retries once without it
+ *   - generous max_tokens so reasoning never starves the spec itself
+ *   - up to 3 attempts on transient failures (network, 429/5xx, empty
+ *     streams) — only retried while nothing has been forwarded to the client
+ *   - every attempt + outcome is logged server-side ([model] … in dev.log)
+ *     so any real-world failure is diagnosable from the logs alone
  *
  * Pre-stream validation failures respond with normal JSON {ok:false,error}.
  * Credentials arrive per-request and are never stored.
@@ -70,6 +71,11 @@ function timeoutOrAbort(clientSignal: AbortSignal, ms: number): AbortSignal {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Server-side diagnostics: every [model] line lands in dev.log. */
+const log = (msg: string) => {
+  console.log(`[model] ${msg}`);
+};
 
 export async function POST(req: NextRequest): Promise<Response> {
   // --- Parse body -----------------------------------------------------------
@@ -144,6 +150,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       let keepAlive: ReturnType<typeof setInterval> | null = null;
       let forwarded = false; // has any spec text been sent to the client?
       const readerRef: { current: ReadableStreamDefaultReader<Uint8Array> | null } = { current: null };
+      const t0 = Date.now();
 
       const send = (obj: unknown) => {
         if (closed) return;
@@ -173,6 +180,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       };
       const fail = (msg: string) => {
         if (closed) return;
+        log(`FAIL (${((Date.now() - t0) / 1000).toFixed(1)}s): ${msg}`);
         send({ t: "error", v: msg });
         try {
           readerRef.current?.cancel().catch(() => undefined);
@@ -211,18 +219,14 @@ export async function POST(req: NextRequest): Promise<Response> {
       const RETRYABLE = new Set([429, 500, 502, 503, 504]);
       const MAX_ATTEMPTS = 3;
 
+      log(`start provider=${provider} model=${model} object="${object}"`);
       try {
         send({ t: "open" });
-
-        // GLM-4.6 reasons for a long time by default; for structured JSON we
-        // ask it to skip that. If the endpoint rejects the parameter, the
-        // 400-fallback below retries without it.
-        let extra: Record<string, unknown> =
-          provider === "zai" ? { thinking: { type: "disabled" } } : {};
 
         let succeeded = false;
         for (let attempt = 1; attempt <= MAX_ATTEMPTS && !succeeded && !closed; attempt++) {
           if (attempt > 1) {
+            log(`retry attempt ${attempt}/${MAX_ATTEMPTS}`);
             send({ t: "ping" });
             await sleep(700 * attempt);
             if (closed || req.signal.aborted) return;
@@ -240,21 +244,26 @@ export async function POST(req: NextRequest): Promise<Response> {
                   { role: "user", content: `Build a holographic model of: ${object}` },
                 ],
                 temperature: 0.7,
-                max_tokens: 3000,
+                // Generous: reasoning models can burn thousands of tokens on
+                // thinking before the spec — the cap must never starve output.
+                max_tokens: 8000,
                 stream: true,
-                ...extra,
               }),
               // 150s for the provider's first byte — covers long thinking.
               signal: timeoutOrAbort(req.signal, 150_000),
             });
           } catch (err) {
-            if (req.signal.aborted) return; // client went away
+            if (req.signal.aborted) {
+              log("client disconnected before response");
+              return;
+            }
             if (err instanceof DOMException && err.name === "AbortError") {
-              // our first-byte timeout — worth another shot
+              log(`attempt ${attempt}: no first byte within 150s`);
               if (attempt < MAX_ATTEMPTS) continue;
               fail(`${info.label} took too long to start responding. Try again.`);
               return;
             }
+            log(`attempt ${attempt}: network error reaching ${baseUrl}`);
             if (attempt < MAX_ATTEMPTS) continue;
             fail(
               `Could not reach ${info.label} at ${baseUrl}. Check the base URL and your network, then try again.`
@@ -265,12 +274,7 @@ export async function POST(req: NextRequest): Promise<Response> {
           if (!providerRes.ok) {
             const status = providerRes.status;
             const detail = await extractDetail(providerRes);
-            // Unknown-parameter style rejection → one clean retry without extras.
-            if (status === 400 && Object.keys(extra).length > 0) {
-              extra = {};
-              attempt--; // doesn't consume a retry slot
-              continue;
-            }
+            log(`attempt ${attempt}: HTTP ${status}${detail ? ` — ${detail}` : ""}`);
             if (RETRYABLE.has(status) && attempt < MAX_ATTEMPTS) continue;
             if (status === 401 || status === 403) {
               fail(
@@ -288,6 +292,7 @@ export async function POST(req: NextRequest): Promise<Response> {
           }
 
           if (!providerRes.body) {
+            log(`attempt ${attempt}: 200 but no body`);
             if (attempt < MAX_ATTEMPTS) continue;
             fail(`${info.label} returned no stream. Try again or switch models.`);
             return;
@@ -301,11 +306,15 @@ export async function POST(req: NextRequest): Promise<Response> {
           let finish = "stop";
           let sawOutput = false;
           let sentDesigning = false;
+          let contentChars = 0;
+          let reasoningChars = 0;
+          let firstByteAt = 0;
 
           try {
             while (true) {
               const { done, value } = await reader.read();
               if (done) break;
+              if (!firstByteAt) firstByteAt = Date.now() - t0;
               armIdle(); // every provider chunk proves it's alive
               buf += decoder.decode(value, { stream: true });
 
@@ -320,14 +329,18 @@ export async function POST(req: NextRequest): Promise<Response> {
                   const chunk = JSON.parse(payload) as ProviderStreamChunk;
                   const choice = chunk.choices?.[0];
                   const reasoning = choice?.delta?.reasoning_content;
-                  if (typeof reasoning === "string" && reasoning && !sentDesigning) {
-                    sentDesigning = true;
-                    send({ t: "phase", v: "designing" }); // still thinking, alive
+                  if (typeof reasoning === "string" && reasoning) {
+                    reasoningChars += reasoning.length;
+                    if (!sentDesigning) {
+                      sentDesigning = true;
+                      send({ t: "phase", v: "designing" }); // still thinking, alive
+                    }
                   }
                   const content = choice?.delta?.content;
                   if (typeof content === "string" && content) {
                     sawOutput = true;
                     forwarded = true;
+                    contentChars += content.length;
                     send({ t: "delta", v: content });
                   }
                   if (choice && typeof choice.finish_reason === "string" && choice.finish_reason) {
@@ -340,6 +353,15 @@ export async function POST(req: NextRequest): Promise<Response> {
             }
           } catch {
             if (closed) return; // idle watchdog already reported
+            log(
+              `attempt ${attempt}: stream interrupted after ${contentChars} content chars / ${reasoningChars} reasoning chars`
+            );
+            if (forwarded) {
+              // real content reached the client — closing the NDJSON stream now
+              // lets the client's salvage parser keep what it got
+              close();
+              return;
+            }
             fail(`The connection to ${info.label} was interrupted mid-build. Try again.`);
             return;
           } finally {
@@ -348,6 +370,11 @@ export async function POST(req: NextRequest): Promise<Response> {
               idleTimer = null;
             }
           }
+
+          log(
+            `attempt ${attempt}: done finish=${finish} content=${contentChars} reasoning=${reasoningChars}` +
+              ` firstByte=${firstByteAt ? `${(firstByteAt / 1000).toFixed(1)}s` : "never"}`
+          );
 
           if (sawOutput) {
             send({ t: "done", finish });
@@ -358,6 +385,10 @@ export async function POST(req: NextRequest): Promise<Response> {
           if (attempt < MAX_ATTEMPTS) continue;
           fail(`${info.label} returned an empty stream. Try again or switch models.`);
           return;
+        }
+
+        if (succeeded) {
+          log(`OK (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
         }
       } finally {
         close();

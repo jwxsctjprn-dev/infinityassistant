@@ -19,6 +19,8 @@ export interface BuildingState {
   count: number | null;
   /** Optional status note from the stream (e.g. "designing" while the AI thinks). */
   note?: string;
+  /** On failure: the human-readable reason (shown under BUILD FAILED). */
+  message?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -103,6 +105,11 @@ function BuildProgress({ building }: { building: BuildingState }) {
       {!failed && (
         <p className="mt-2 text-center font-mono text-[10px] tracking-widest text-sky-200/40">
           {meta}
+        </p>
+      )}
+      {failed && building.message && (
+        <p className="mt-2 px-2 text-center text-[10px] leading-relaxed text-red-300/70">
+          {building.message}
         </p>
       )}
     </motion.div>

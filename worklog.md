@@ -159,3 +159,17 @@ Work Log:
 
 Stage Summary:
 - 502s are now handled at every layer: keepalives prevent gateway idle-kills, 150s first-byte budget accommodates reasoning, transient provider 502/5xx retried invisibly, zai thinking disabled for fast structured output, and interrupted builds salvage partial specs. The user's "make me a rocket ship" flow verified end-to-end against a simulated provider.
+
+---
+Task ID: 14
+Agent: main (Z.ai Code)
+Task: User's build STILL failed ("I couldn't build that") after the 502 fixes — find and fix the real cause.
+
+Work Log:
+- Evidence: `POST /api/model 200 in 47s` — keepalives worked (no gateway 502), but the build still failed. 47s ≈ 3 × ~15s attempts = the retry chain exhausting, i.e. the provider was returning streams with no usable content. Prime suspect: the experimental `thinking:{type:"disabled"}` body param from Task 13 — Z.AI's endpoint didn't 400 on it (my fallback never fired) but silently returned contentless streams. Secondary UX bug: the real error message was INVISIBLE in workbench mode (chrome incl. the red error line fades to black), so the user could only ever hear "I couldn't build that."
+- /api/model v3: REMOVED the thinking param entirely (keepalives + 150s first-byte budget + idle-reset-on-every-chunk already make long reasoning safe); max_tokens 3000→8000 so reasoning models can never starve the spec itself; mid-stream interruption AFTER content was forwarded now closes cleanly (client salvage keeps the partial spec) instead of erroring; added [model] server-side logging of every attempt/outcome (provider status, content/reasoning char counts, first-byte time, finish reason, retry count) — any future real-world failure is diagnosable from dev.log alone.
+- Failure visibility: BuildingState.message — BUILD FAILED now shows the actual reason in red under the bar for 3.5s (plus the toast); the spoken "I couldn't build that." stays as the voice summary.
+- E2E via mock (deleted after): curl — normal spec OK; "empty" mode (200 stream, zero content, ×2) logged `attempt 1/2: content=0` → retried → `OK (9.0s)` with the model delivered; garbage → clean done event; browser — lighthouse build OK (14 parts persisted); garbage build now visibly shows "BUILD FAILED" + "The model plan came back incomplete — try building it again." in the workbench; [model] diagnostics confirmed in dev.log; zero page errors; lint clean; mock + storage cleaned.
+
+Stage Summary:
+- Removed the silently-poisonous thinking param and the 8000-token budget removes reasoning starvation; every failure is now both diagnosable server-side ([model] logs) and visible to the user in the workbench (reason under BUILD FAILED). If the next real build fails, the on-screen reason + dev.log line will pinpoint the provider's exact behavior.

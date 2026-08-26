@@ -715,8 +715,8 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
           const msg = err instanceof Error && err.message ? err.message : "The build failed.";
           setError(msg);
           toast.error(msg);
-          setBuilding((b) => (b ? { ...b, phase: "error" } : b));
-          await sleep(1400);
+          setBuilding((b) => (b ? { ...b, phase: "error", message: msg } : b));
+          await sleep(3500);
           setBuilding(null);
           try {
             await speak("I couldn't build that.");

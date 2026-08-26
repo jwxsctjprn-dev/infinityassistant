@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import type { AgentState, ChatMessage } from "@/lib/infinity/types";
 import { isConfigured, useInfinity } from "@/lib/infinity/settings";
+import { matchWorkbenchCommand, type WorkbenchAction } from "@/lib/infinity/workbench";
 
 /* ------------------------------------------------------------------ */
 /* Minimal ambient types for the Web Speech API                        */
@@ -371,11 +372,75 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
     [setAgentState]
   );
 
+  /* -------------------------- workbench ----------------------------- */
+
+  /** Execute a workbench command: toggle the grid, confirm out loud,
+   *  then resume the conversation loop (never hits the LLM). */
+  const applyWorkbench = useCallback(
+    async (action: WorkbenchAction) => {
+      const opening = action === "open";
+      useInfinity.getState().setWorkbench(opening);
+
+      // Stop recognition first so Infinity never hears its own confirmation.
+      const sess = sessionRef.current;
+      if (sess) {
+        try {
+          sess.rec?.stop();
+        } catch {
+          /* noop */
+        }
+        if (sess.debounce) clearTimeout(sess.debounce);
+        if (sess.interimTimer) clearTimeout(sess.interimTimer);
+        sess.finalBuf = "";
+        sess.lastInterim = "";
+      }
+
+      if (activeRef.current) {
+        const confirmText = opening ? "Workbench online." : "Workbench closed.";
+        setLastReply(confirmText);
+        try {
+          await speak(confirmText);
+        } catch {
+          /* confirmation is best-effort */
+        }
+        if (!activeRef.current) return;
+        const s2 = sessionRef.current;
+        if (s2 && !s2.stopped) {
+          window.setTimeout(() => {
+            const s3 = sessionRef.current;
+            if (s3 === s2 && !s3.stopped && activeRef.current) {
+              setAgentState("listening");
+              beginListeningRef.current(s3);
+            }
+          }, 300);
+        } else {
+          setAgentState("idle");
+        }
+      }
+    },
+    [setAgentState, speak]
+  );
+
+  /** Returns true when the text was a workbench command (already handled). */
+  const tryWorkbench = useCallback(
+    (raw: string): boolean => {
+      const action = matchWorkbenchCommand(raw);
+      if (!action) return false;
+      setInterim("");
+      setLastUser(raw.trim());
+      setError(null);
+      void applyWorkbench(action);
+      return true;
+    },
+    [applyWorkbench]
+  );
+
   /* ---------------------------- one turn ---------------------------- */
 
   const runTurn = useCallback(
     async (userText: string) => {
       if (stateRef.current === "thinking" || stateRef.current === "speaking") return;
+      if (tryWorkbench(userText)) return;
       setError(null);
       setLastUser(userText);
       setInterim("");
@@ -439,7 +504,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         setAgentState("idle");
       }
     },
-    [askChat, setAgentState, speak]
+    [askChat, setAgentState, speak, tryWorkbench]
   );
 
   /* --------------------- recognition wiring ------------------------- */
@@ -621,6 +686,8 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
     (text: string) => {
       const t = text.trim();
       if (!t) return;
+      // Workbench commands are local — they work even without an API key.
+      if (tryWorkbench(t)) return;
       const s = useInfinity.getState().settings;
       if (!isConfigured(s)) {
         toast("Add your API key in Settings first.", {
@@ -643,7 +710,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       }
       void runTurn(t);
     },
-    [runTurn, setAgentState]
+    [runTurn, setAgentState, tryWorkbench]
   );
 
   const toggle = useCallback(() => {

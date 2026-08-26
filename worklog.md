@@ -75,3 +75,19 @@ Work Log:
 
 Stage Summary:
 - Conversation loop fixed and browser-verified end to end incl. failure modes. Voice STT itself still needs a real mic (open preview in new tab); typing path guarantees working conversation everywhere.
+
+---
+Task ID: 9
+Agent: main (Z.ai Code)
+Task: Add Workbench mode (voice/typed command → holographic grid, visual only).
+
+Work Log:
+- src/lib/infinity/workbench.ts — matchWorkbenchCommand(): open/close phrase matching, ≤6 words, verbs (open/start/enter/show/enable/activate/launch/begin/turn on; close/exit/leave/stop/end/disable/hide/quit), bare "workbench" ≤3 words → open; casual mentions ignored.
+- settings store — workbench flag + setWorkbench; persist now partializes to settings only (mode not persisted).
+- src/components/infinity/workbench-grid.tsx + globals.css — perspective floor grid (rotateX 56°, 44px cells, flowing toward viewer, radial edge mask), horizon glow, elliptical projection pad under orb (concentric rings + slow rotating tick dial), all faint sky-400 on black; fades in/out 1.1s via AnimatePresence.
+- Agent hook — tryWorkbench() intercepts commands in BOTH paths: runTurn (voice) and sendText (typed), before any LLM/config requirement (works keyless). applyWorkbench(): stops recognition first (never hears its own confirmation), toggles grid, speaks "Workbench online./closed." via Microsoft TTS if a session is live, then resumes listening (voice) / idle (text). Fixed null-session crash for typed commands.
+- page.tsx — grid layer z-0 behind orb; gear + captions fade out (pointer-events-none); wordmark cross-fades INFINITY ⇄ WORKBENCH; text input dims to 50% but stays usable (typed "close workbench" must remain possible); Esc chain: input → session → workbench → input.
+- E2E (agent-browser + VLM): typed "open workbench" → grid + WORKBENCH wordmark, no key needed; "start workbench mode" reopens; "close workbench" closes; Esc exits; "what is a workbench anyway" correctly NOT treated as command (goes to LLM path); VLM confirmed faint holo floor, pad rings, centered orb, no seams/glitches; zero console errors; lint clean; fresh state restored.
+
+Stage Summary:
+- Workbench mode shipped as pure visual stage. Voice phrase detection shares the exact code path as typed (verified typed path E2E; voice utterance capture itself needs a real mic). Ready for feature commands per user's next request.

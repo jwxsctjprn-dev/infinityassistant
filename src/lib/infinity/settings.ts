@@ -18,19 +18,28 @@ export const DEFAULT_SETTINGS: Settings = {
 
 interface InfinityStore {
   settings: Settings;
+  /** Holographic build-table overlay (session state — not persisted) */
+  workbench: boolean;
   setSettings: (patch: Partial<Settings>) => void;
   resetSettings: () => void;
+  setWorkbench: (v: boolean) => void;
 }
 
 export const useInfinity = create<InfinityStore>()(
   persist(
     (set) => ({
       settings: DEFAULT_SETTINGS,
+      workbench: false,
       setSettings: (patch) =>
         set((state) => ({ settings: { ...state.settings, ...patch } })),
       resetSettings: () => set({ settings: DEFAULT_SETTINGS }),
+      setWorkbench: (v) => set({ workbench: v }),
     }),
-    { name: "infinity-settings", version: 1 }
+    {
+      name: "infinity-settings",
+      version: 1,
+      partialize: (state) => ({ settings: state.settings }),
+    }
   )
 );
 

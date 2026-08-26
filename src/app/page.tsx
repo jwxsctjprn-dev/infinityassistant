@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Settings2 } from "lucide-react";
 import { Orb } from "@/components/infinity/orb";
 import { SettingsDialog } from "@/components/infinity/settings-dialog";
+import { WorkbenchGrid } from "@/components/infinity/workbench-grid";
 import { Toaster } from "@/components/ui/sonner";
 import { useInfinityAgent } from "@/hooks/use-infinity-agent";
 import { isConfigured, useInfinity } from "@/lib/infinity/settings";
@@ -23,6 +24,8 @@ export default function Home() {
   const [inputValue, setInputValue] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
   const captions = useInfinity((s) => s.settings.captions);
+  const workbench = useInfinity((s) => s.workbench);
+  const setWorkbench = useInfinity((s) => s.setWorkbench);
 
   const onNeedSettings = useCallback(() => setSettingsOpen(true), []);
   const agent = useInfinityAgent(onNeedSettings);
@@ -93,6 +96,7 @@ export default function Home() {
           return;
         }
         if (agent.sessionActive) agent.stop();
+        else if (workbench) setWorkbench(false);
         else setInputVisible(false);
         return;
       }
@@ -128,13 +132,15 @@ export default function Home() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [agent, handleToggle, inputVisible, settingsOpen]);
+  }, [agent, handleToggle, inputVisible, setWorkbench, settingsOpen, workbench]);
 
   const configured = mounted ? isConfigured(useInfinity.getState().settings) : false;
   const stateLabel = STATE_LABEL[agent.state];
 
   let hint = "";
-  if (!agent.sessionActive && !inputVisible) {
+  if (workbench) {
+    hint = "";
+  } else if (!agent.sessionActive && !inputVisible) {
     hint = configured ? "CLICK THE ORB TO TALK · PRESS / TO TYPE" : "OPEN SETTINGS TO ADD YOUR API KEY";
   } else if (agent.mode === "text" && agent.state === "idle") {
     hint = "TYPE BELOW · ENTER TO SEND";
@@ -142,24 +148,42 @@ export default function Home() {
 
   return (
     <div className="fixed inset-0 select-none overflow-hidden bg-black text-zinc-100">
+      {/* Workbench holographic grid (behind everything) */}
+      <AnimatePresence>{workbench && <WorkbenchGrid key="wb" />}</AnimatePresence>
+
       {/* Settings */}
       <button
         type="button"
         aria-label="Settings (⌘,)"
         title="Settings (⌘,)"
         onClick={() => setSettingsOpen(true)}
-        className="absolute right-5 top-5 rounded-full p-2.5 text-zinc-500 transition-colors hover:bg-white/5 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/50"
+        className={`absolute right-5 top-5 z-20 rounded-full p-2.5 text-zinc-500 transition-all duration-1000 hover:bg-white/5 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/50 ${
+          workbench ? "pointer-events-none opacity-0" : "opacity-100"
+        }`}
       >
         <Settings2 className="h-5 w-5" />
       </button>
 
-      {/* Wordmark */}
-      <p className="absolute left-1/2 top-6 -translate-x-1/2 text-[13px] font-light tracking-[0.45em] text-zinc-600">
-        INFINITY
-      </p>
+      {/* Wordmark: INFINITY ⇄ WORKBENCH */}
+      <div className="absolute left-1/2 top-6 z-20 h-5 -translate-x-1/2 text-[13px] font-light tracking-[0.45em]">
+        <span
+          className={`absolute left-1/2 -translate-x-1/2 whitespace-nowrap text-zinc-600 transition-opacity duration-1000 ${
+            workbench ? "opacity-0" : "opacity-100"
+          }`}
+        >
+          INFINITY
+        </span>
+        <span
+          className={`absolute left-1/2 -translate-x-1/2 whitespace-nowrap text-sky-500/40 transition-opacity duration-1000 ${
+            workbench ? "opacity-100" : "opacity-0"
+          }`}
+        >
+          WORKBENCH
+        </span>
+      </div>
 
       {/* Orb */}
-      <main className="flex h-full w-full items-center justify-center">
+      <main className="relative z-10 flex h-full w-full items-center justify-center">
         <div className="flex flex-col items-center gap-10">
           <Orb state={agent.state} levelRef={agent.levelRef} onClick={handleToggle} />
 
@@ -207,9 +231,9 @@ export default function Home() {
       {/* Captions */}
       {mounted && captions && (
         <div
-          className={`pointer-events-none absolute inset-x-0 flex justify-center px-6 ${
-            inputVisible ? "bottom-24" : "bottom-8"
-          }`}
+          className={`pointer-events-none absolute inset-x-0 z-10 flex justify-center px-6 transition-opacity duration-1000 ${
+            workbench ? "opacity-0" : "opacity-100"
+          } ${inputVisible ? "bottom-24" : "bottom-8"}`}
         >
           <div className="max-w-xl space-y-1.5 text-center" aria-live="polite">
             <AnimatePresence>
@@ -264,7 +288,9 @@ export default function Home() {
             exit={{ opacity: 0, y: 8 }}
             transition={{ duration: 0.2 }}
             onSubmit={submitText}
-            className="absolute inset-x-0 bottom-0 flex justify-center px-6 pb-7"
+            className={`absolute inset-x-0 bottom-0 z-20 flex justify-center px-6 pb-7 transition-opacity duration-1000 ${
+              workbench ? "opacity-50" : "opacity-100"
+            }`}
           >
             <input
               ref={inputRef}

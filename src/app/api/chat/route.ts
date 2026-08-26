@@ -39,6 +39,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<ChatResponseB
   const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
   const baseUrlOverride = typeof body.baseUrl === "string" ? body.baseUrl.trim() : "";
   const model = typeof body.model === "string" ? body.model.trim() : "";
+  const maxTokensRaw = typeof body.maxTokens === "number" ? body.maxTokens : 300;
+  const maxTokens = Math.max(64, Math.min(4000, Math.round(maxTokensRaw)));
   const systemPrompt = typeof body.systemPrompt === "string" ? body.systemPrompt.trim() : "";
   const messages = Array.isArray(body.messages) ? body.messages : [];
 
@@ -104,7 +106,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<ChatResponseB
         model,
         messages: outboundMessages,
         temperature: 0.8,
-        max_tokens: 300,
+        max_tokens: maxTokens,
         stream: false,
       }),
       signal: AbortSignal.timeout(45_000),

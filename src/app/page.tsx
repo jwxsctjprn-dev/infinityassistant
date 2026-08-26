@@ -6,6 +6,7 @@ import { Settings2 } from "lucide-react";
 import { Orb } from "@/components/infinity/orb";
 import { SettingsDialog } from "@/components/infinity/settings-dialog";
 import { WorkbenchGrid } from "@/components/infinity/workbench-grid";
+import { WorkbenchModels } from "@/components/infinity/workbench-models";
 import { Toaster } from "@/components/ui/sonner";
 import { useInfinityAgent } from "@/hooks/use-infinity-agent";
 import { isConfigured, useInfinity } from "@/lib/infinity/settings";
@@ -166,6 +167,7 @@ export default function Home() {
     <div className="fixed inset-0 select-none overflow-hidden bg-black text-zinc-100">
       {/* Workbench: flat grid only after everything has faded to black */}
       <AnimatePresence>{gridVisible && <WorkbenchGrid key="wb" />}</AnimatePresence>
+      {gridVisible && <WorkbenchModels building={agent.building} />}
 
       {/* Settings */}
       <button

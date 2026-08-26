@@ -2,9 +2,16 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import type { AgentState, ChatMessage } from "@/lib/infinity/types";
+import type { AgentState, ChatMessage, HoloSpec } from "@/lib/infinity/types";
 import { isConfigured, useInfinity } from "@/lib/infinity/settings";
-import { matchWorkbenchCommand, type WorkbenchAction } from "@/lib/infinity/workbench";
+import {
+  matchBuildCommand,
+  matchDeleteCommand,
+  matchWorkbenchCommand,
+  type WorkbenchAction,
+} from "@/lib/infinity/workbench";
+import { MAX_MODELS, MODEL_GEN_SYSTEM, nextSlot, parseHoloSpec } from "@/lib/infinity/holo";
+import type { BuildingState } from "@/components/infinity/workbench-models";
 
 /* ------------------------------------------------------------------ */
 /* Minimal ambient types for the Web Speech API                        */
@@ -98,6 +105,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
   const [lastReply, setLastReply] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [micBlocked, setMicBlocked] = useState(false);
+  const [building, setBuilding] = useState<BuildingState | null>(null);
 
   const levelRef = useRef(0);
   const stateRef = useRef<AgentState>("idle");
@@ -435,12 +443,214 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
     [applyWorkbench]
   );
 
+  /** Pause mic + clear buffers so Infinity never hears its own voice. */
+  const pauseMic = useCallback(() => {
+    const sess = sessionRef.current;
+    if (!sess) return;
+    try {
+      sess.rec?.stop();
+    } catch {
+      /* noop */
+    }
+    if (sess.debounce) clearTimeout(sess.debounce);
+    if (sess.interimTimer) clearTimeout(sess.interimTimer);
+    sess.finalBuf = "";
+    sess.lastInterim = "";
+    setInterim("");
+  }, []);
+
+  /** Back to listening (voice) or idle (text) after a workbench action. */
+  const resumeAfterAction = useCallback(() => {
+    if (!activeRef.current) return;
+    const sess = sessionRef.current;
+    if (sess && !sess.stopped) {
+      window.setTimeout(() => {
+        const s3 = sessionRef.current;
+        if (s3 === sess && !s3.stopped && activeRef.current) {
+          setAgentState("listening");
+          beginListeningRef.current(s3);
+        }
+      }, 300);
+    } else {
+      setAgentState("idle");
+    }
+  }, [setAgentState]);
+
+  /* --------------------- build & delete models --------------------- */
+
+  /** Ask the LLM for a JSON model spec (single-shot, generous tokens). */
+  const askSpec = useCallback(async (object: string): Promise<HoloSpec> => {
+    const s = useInfinity.getState().settings;
+    const ac = new AbortController();
+    abortRef.current?.abort();
+    abortRef.current = ac;
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: ac.signal,
+      body: JSON.stringify({
+        provider: s.provider,
+        apiKey: s.apiKey.trim(),
+        baseUrl: s.baseUrl.trim() || undefined,
+        model: s.model.trim(),
+        messages: [{ role: "user", content: `Build a holographic model of: ${object}` }],
+        systemPrompt: MODEL_GEN_SYSTEM,
+        maxTokens: 3000,
+      }),
+    });
+    const data = (await res.json()) as
+      | { ok: true; reply: string }
+      | { ok: false; error: string };
+    if (!res.ok || !data.ok) {
+      throw new Error(data.ok ? "" : data.error || "The model generator failed.");
+    }
+    return parseHoloSpec(data.reply, object);
+  }, []);
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  /** Intercept "build a model of X" — speaks, shows progress, spawns model. */
+  const tryBuild = useCallback(
+    (raw: string): boolean => {
+      const cmd = matchBuildCommand(raw);
+      if (!cmd) return false;
+
+      setInterim("");
+      setLastUser(raw.trim());
+      setError(null);
+
+      const s = useInfinity.getState().settings;
+      if (!isConfigured(s)) {
+        toast("Add your API key in Settings to build models.", {
+          action: { label: "Settings", onClick: () => onNeedSettingsRef.current() },
+        });
+        onNeedSettingsRef.current();
+        return true;
+      }
+
+      const models = useInfinity.getState().models;
+      if (models.length >= MAX_MODELS) {
+        toast.error("The workbench is full — delete a model first.");
+        return true;
+      }
+
+      useInfinity.getState().setWorkbench(true);
+      pauseMic();
+
+      void (async () => {
+        try {
+          await speak("OK, building that now.");
+        } catch {
+          /* best effort */
+        }
+        if (!activeRef.current && !sessionRef.current) {
+          setAgentState("idle");
+        }
+        setBuilding({ name: cmd.object, phase: "building" });
+
+        try {
+          const spec = await askSpec(cmd.object);
+          const store = useInfinity.getState();
+          if (store.models.length >= MAX_MODELS) throw new Error("Workbench is full.");
+          store.addModel({
+            id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            name: spec.name,
+            spec,
+            pos: nextSlot(store.models.length),
+            rot: { x: 0.12, y: -0.55 },
+          });
+          setBuilding((b) => (b ? { ...b, name: spec.name, phase: "done" } : b));
+          await sleep(900);
+          setBuilding(null);
+          try {
+            await speak(`${spec.name} ready.`);
+          } catch {
+            /* best effort */
+          }
+        } catch (err) {
+          if (abortRef.current?.signal.aborted) {
+            setBuilding(null);
+            return;
+          }
+          const msg = err instanceof Error && err.message ? err.message : "The build failed.";
+          setError(msg);
+          toast.error(msg);
+          setBuilding((b) => (b ? { ...b, phase: "error" } : b));
+          await sleep(1400);
+          setBuilding(null);
+          try {
+            await speak("I couldn't build that.");
+          } catch {
+            /* best effort */
+          }
+        }
+        resumeAfterAction();
+      })();
+      return true;
+    },
+    [askSpec, pauseMic, resumeAfterAction, setAgentState, speak]
+  );
+
+  /** Intercept "delete the X" / "clear the workbench" while in workbench. */
+  const tryDelete = useCallback(
+    (raw: string): boolean => {
+      const store = useInfinity.getState();
+      if (!store.workbench || store.models.length === 0) return false;
+      const cmd = matchDeleteCommand(
+        raw,
+        store.models.map((m) => m.name)
+      );
+      if (!cmd) return false;
+
+      setInterim("");
+      setLastUser(raw.trim());
+      setError(null);
+      pauseMic();
+
+      if (cmd.all) {
+        const names = store.models.map((m) => m.name);
+        store.clearModels();
+        void (async () => {
+          try {
+            await speak(
+              names.length === 1
+                ? `Removed the ${names[0]}.`
+                : `Cleared ${names.length} models from the workbench.`
+            );
+          } catch {
+            /* best effort */
+          }
+          resumeAfterAction();
+        })();
+        return true;
+      }
+
+      const target = store.models.find(
+        (m) => m.name.toLowerCase() === cmd.name.toLowerCase()
+      ) ?? store.models.find((m) => m.name.toLowerCase().includes(cmd.name.toLowerCase()));
+      if (!target) return false; // mentioned nothing we have → normal chat
+      store.removeModel(target.id);
+      void (async () => {
+        try {
+          await speak(`Removed the ${target.name}.`);
+        } catch {
+          /* best effort */
+        }
+        resumeAfterAction();
+      })();
+      return true;
+    },
+    [pauseMic, resumeAfterAction, speak]
+  );
+
   /* ---------------------------- one turn ---------------------------- */
 
   const runTurn = useCallback(
     async (userText: string) => {
       if (stateRef.current === "thinking" || stateRef.current === "speaking") return;
       if (tryWorkbench(userText)) return;
+      if (tryDelete(userText)) return;
+      if (tryBuild(userText)) return;
       setError(null);
       setLastUser(userText);
       setInterim("");
@@ -504,7 +714,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         setAgentState("idle");
       }
     },
-    [askChat, setAgentState, speak, tryWorkbench]
+    [askChat, setAgentState, speak, tryBuild, tryDelete, tryWorkbench]
   );
 
   /* --------------------- recognition wiring ------------------------- */
@@ -688,6 +898,8 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       if (!t) return;
       // Workbench commands are local — they work even without an API key.
       if (tryWorkbench(t)) return;
+      if (tryDelete(t)) return;
+      if (tryBuild(t)) return;
       const s = useInfinity.getState().settings;
       if (!isConfigured(s)) {
         toast("Add your API key in Settings first.", {
@@ -710,7 +922,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       }
       void runTurn(t);
     },
-    [runTurn, setAgentState, tryWorkbench]
+    [runTurn, setAgentState, tryBuild, tryDelete, tryWorkbench]
   );
 
   const toggle = useCallback(() => {
@@ -755,6 +967,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
     lastReply,
     error,
     micBlocked,
+    building,
     levelRef,
     start,
     stop,

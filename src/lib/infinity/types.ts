@@ -33,6 +33,8 @@ export interface ChatRequestBody {
   model: string;
   messages: ChatMessage[];
   systemPrompt?: string;
+  /** Optional completion budget override (default 300, max 4000) */
+  maxTokens?: number;
 }
 
 /** POST /api/chat response (success) */
@@ -56,6 +58,40 @@ export interface TtsRequestBody {
 }
 
 export type AgentState = "idle" | "listening" | "thinking" | "speaking";
+
+/* ------------------------------------------------------------------ */
+/* Workbench holographic models                                        */
+/* ------------------------------------------------------------------ */
+
+export type HoloPartType =
+  | "box"
+  | "sphere"
+  | "cylinder"
+  | "cone"
+  | "torus"
+  | "capsule";
+
+export interface HoloPart {
+  type: HoloPartType;
+  position: [number, number, number];
+  rotation: [number, number, number];
+  scale: [number, number, number];
+  color: string;
+}
+
+export interface HoloSpec {
+  name: string;
+  parts: HoloPart[];
+}
+
+/** A model placed on the workbench (positions are screen percentages). */
+export interface HoloModel {
+  id: string;
+  name: string;
+  spec: HoloSpec;
+  pos: { x: number; y: number };
+  rot: { x: number; y: number };
+}
 
 export const DEFAULT_SYSTEM_PROMPT =
   "You are Infinity, a warm, witty voice companion having a natural spoken conversation with the user. " +

@@ -107,3 +107,23 @@ Work Log:
 
 Stage Summary:
 - Workbench is now exactly: everything fades to black → flat faint-blue full-screen grid → stays until "exit workbench"/Esc. Ready for grid-based features.
+
+---
+Task ID: 11
+Agent: main (Z.ai Code)
+Task: Workbench holographic 3D model builder — AI-generated models, progress bar, drag/rotate with position lock, persistent until deleted.
+
+Work Log:
+- Installed three@0.185 + @react-three/fiber@9.7 + @types/three.
+- types.ts: HoloPart/HoloSpec/HoloModel types; ChatRequestBody.maxTokens. chat route: max_tokens now clamps 64..4000 from body (specs need ~3000).
+- lib/infinity/holo.ts: MODEL_GEN_SYSTEM prompt (JSON-only, ≤48 primitives, 6 types, +Y up); parseHoloSpec() — fence stripping, sanitization (types/colors/vec clamps), bbox centering + uniform fit to 2.3 units; nextSlot() placement; MAX_MODELS=8.
+- workbench.ts: matchBuildCommand ("build/create/... a model of X", "X model" forms; strips filler; ≤6-word objects) + matchDeleteCommand ({all:true} for "clear workbench"/"delete all"; name match = all name words >2 chars present, plural-insensitive).
+- Store v2: models[] + add/remove/clear/updateModel(pos|rot); persisted via partialize; migrate from v1.
+- holo-model-mesh.tsx: per-model transparent Canvas; parts as dual-mesh (emissive transparent fill + wireframe shell) = holographic read; user rotation + gentle bob.
+- workbench-models.tsx: ModelCard (44/56px→ h-44/h-56 responsive) — drag=move (pointer %, clamped 6-94/8-92), shift/right/ctrl-drag=rotate; BuildProgress: centered fading bar, crawls to 90% while generating, jumps to 100% on done, red on error; tiny name label under model.
+- Agent hook: tryBuild/tryDelete interception in runTurn + sendText (order: workbench → delete → build); build flow: auto-opens workbench, pauses mic, speaks "OK, building that now.", progress phase, askSpec via /api/chat (maxTokens 3000, gen system prompt), spawn model, "X ready." / error path speaks "I couldn't build that."; delete speaks "Removed the X."; resumeAfterAction() returns to listening/idle.
+- E2E (browser + mock LLM spec): build → card+WebGL canvas appeared center, label LIGHTHOUSE, persisted; VLM verified holographic translucent wireframe lighthouse on clean grid, no glitches; drag moved card 640,265→840,500 with pos locked in storage; shift-drag rotate verified via synthetic PointerEvent (rot deltas exact); reload+reopen → pos 78/92% + rot 0.36/0.73 restored; "delete the lighthouse" removed from screen+storage; lint clean; mock+storage cleaned (fresh first-run).
+- Note: CLI synthetic events can't carry Shift/button-2 modifiers — rotate verified via dispatched PointerEvents; real browsers get true modifier state.
+
+Stage Summary:
+- Full build→progress→spawn→drag/rotate-lock→persist→delete loop shipped and E2E-verified. Real-LLM spec quality depends on user's model (glm-4.6/gpt-4o etc. handle JSON specs well).

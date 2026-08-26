@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import type { AgentState, ChatMessage, HoloSpec } from "@/lib/infinity/types";
+import type { AgentState, ChatMessage } from "@/lib/infinity/types";
 import { isConfigured, useInfinity } from "@/lib/infinity/settings";
 import {
   matchBuildCommand,
@@ -10,14 +10,9 @@ import {
   matchWorkbenchCommand,
   type WorkbenchAction,
 } from "@/lib/infinity/workbench";
-import {
-  MAX_MODELS,
-  createSpecStreamScanner,
-  nextSlot,
-  parseHoloSpec,
-  type SpecScan,
-} from "@/lib/infinity/holo";
+import { MAX_MODELS, nextSlot } from "@/lib/infinity/holo";
 import { ASSEMBLE_MS, matchLibraryModel } from "@/lib/infinity/holo-library";
+import { generateModel } from "@/lib/infinity/holo-generator";
 import type { BuildingState } from "@/components/infinity/workbench-models";
 
 /**
@@ -110,6 +105,8 @@ export interface UseInfinityAgent {
   lastReply: string;
   error: string | null;
   micBlocked: boolean;
+  /** Live workbench build progress (null when idle). */
+  building: BuildingState | null;
   /** 0..1 smoothed audio loudness for the orb (read imperatively each frame) */
   levelRef: React.MutableRefObject<number>;
   start: () => void;
@@ -500,112 +497,6 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
 
   /* --------------------- build & delete models --------------------- */
 
-  /** Stream a model spec from /api/model, reporting live progress. */
-  const streamSpec = useCallback(
-    async (object: string, onTick: (scan: SpecScan) => void, onPhase?: (phase: string) => void): Promise<HoloSpec> => {
-      const s = useInfinity.getState().settings;
-      const ac = new AbortController();
-      abortRef.current?.abort();
-      abortRef.current = ac;
-
-      let res: Response;
-      try {
-        res = await fetch("/api/model", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: ac.signal,
-          body: JSON.stringify({
-            provider: s.provider,
-            apiKey: s.apiKey.trim(),
-            baseUrl: s.baseUrl.trim() || undefined,
-            model: s.model.trim(),
-            object,
-          }),
-        });
-      } catch (err) {
-        if (ac.signal.aborted) throw new DOMException("Aborted", "AbortError");
-        if (err instanceof TypeError) {
-          throw new Error("Could not reach the model generator. Check your connection.");
-        }
-        throw err;
-      }
-
-      if (!res.ok) {
-        const j = await safeJson<{ ok: false; error: string }>(res);
-        throw new Error((j && !j.ok && j.error) || `The model generator failed (${res.status}).`);
-      }
-      if (!res.body) throw new Error("The model generator returned an empty stream.");
-
-      const scanner = createSpecStreamScanner();
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let pending = "";
-      let full = "";
-      let streamErr: string | null = null;
-      let interrupted = false;
-
-      const salvage = (): HoloSpec | null => {
-        if (!full.trim()) return null;
-        try {
-          return parseHoloSpec(full, object);
-        } catch {
-          return null;
-        }
-      };
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          pending += decoder.decode(value, { stream: true });
-          let nl: number;
-          while ((nl = pending.indexOf("\n")) >= 0) {
-            const rawLine = pending.slice(0, nl).trim();
-            pending = pending.slice(nl + 1);
-            if (!rawLine) continue;
-            let ev: { t?: string; v?: string };
-            try {
-              ev = JSON.parse(rawLine) as { t?: string; v?: string };
-            } catch {
-              continue;
-            }
-            if (ev.t === "delta" && typeof ev.v === "string") {
-              full += ev.v;
-              scanner.feed(ev.v);
-              onTick(scanner.get());
-            } else if (ev.t === "phase" && typeof ev.v === "string") {
-              onPhase?.(ev.v);
-            } else if (ev.t === "error") {
-              streamErr = ev.v || "The model generator failed.";
-            }
-            // "open" / "ping" / "done" need no client action
-          }
-        }
-      } catch {
-        if (ac.signal.aborted) throw new DOMException("Aborted", "AbortError");
-        interrupted = true;
-      }
-
-      if (ac.signal.aborted) throw new DOMException("Aborted", "AbortError");
-
-      // The connection dropped or errored — if real content already streamed,
-      // salvage what arrived instead of wasting the whole build.
-      if (interrupted || streamErr) {
-        const saved = salvage();
-        if (saved) return saved;
-        if (streamErr) throw new Error(streamErr);
-        throw new Error(
-          "The connection to the model generator was interrupted. Try again — your key and settings are fine."
-        );
-      }
-      if (!full.trim()) {
-        throw new Error("The model generator returned nothing. Try again or switch models.");
-      }
-      return parseHoloSpec(full, object);
-    },
-    []
-  );
-
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   /** Intercept "build a model of X" — speaks, shows progress, spawns model. */
@@ -624,9 +515,11 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         return true;
       }
 
-      // ---- Built-in library: instant, offline, cannot fail. No key needed.
-      const libSpec = matchLibraryModel(cmd.object);
-      if (libSpec) {
+      // Everything builds LOCALLY with three.js: the hand-authored library
+      // first, then the procedural generator for anything else. No network,
+      // no API key — a model is guaranteed to spawn.
+      const libSpec = matchLibraryModel(cmd.object) ?? generateModel(cmd.object);
+      {
         useInfinity.getState().setWorkbench(true);
         pauseMic();
 
@@ -685,117 +578,18 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
             /* best effort */
           }
           resumeAfterAction();
-        })();
+        })().catch((err) => {
+          // Unreachable in practice — local geometry + speech can't fail.
+          // Keep it quiet and visible instead of ever saying "couldn't build".
+          console.error("build failed", err);
+          setBuilding(null);
+          toast.error("Something went wrong showing that model.");
+          resumeAfterAction();
+        });
         return true;
       }
-
-      // ---- Unknown object → AI-generated spec (needs a key).
-      const s = useInfinity.getState().settings;
-      if (!isConfigured(s)) {
-        toast("Add your API key in Settings to invent new models.", {
-          action: { label: "Settings", onClick: () => onNeedSettingsRef.current() },
-        });
-        onNeedSettingsRef.current();
-        return true;
-      }
-
-      useInfinity.getState().setWorkbench(true);
-      pauseMic();
-
-      void (async () => {
-        // Bar appears immediately; generation starts in parallel with the
-        // spoken acknowledgement so progress is real from the first second.
-        setBuilding({
-          name: cmd.object,
-          phase: "building",
-          progress: 0.04,
-          partsDone: 0,
-          count: null,
-        });
-
-        let lastTick = 0;
-        const onTick = (sc: SpecScan) => {
-          const now = performance.now();
-          const completed = sc.count !== null && sc.partsSeen >= sc.count;
-          if (now - lastTick < 120 && !completed) return; // throttle re-renders
-          lastTick = now;
-          const denom = Math.max(sc.count ?? 0, sc.partsSeen);
-          const p =
-            denom > 0
-              ? 0.1 + 0.78 * (sc.partsSeen / denom)
-              : Math.min(0.78, 0.1 + 0.68 * (1 - Math.exp(-sc.chars / 2200)));
-          setBuilding((b) =>
-            b
-              ? {
-                  ...b,
-                  progress: Math.max(b.progress, p),
-                  partsDone: sc.partsSeen,
-                  count: sc.count,
-                  note: sc.count !== null ? undefined : b.note,
-                  name: b.name === cmd.object && sc.name ? sc.name : b.name,
-                }
-              : b
-          );
-        };
-
-        const spoken = speak("OK, building that now.").catch(() => {
-          /* best effort */
-        });
-        const onPhase = (phase: string) => {
-          setBuilding((b) => (b ? { ...b, note: phase } : b));
-        };
-        const specPromise = streamSpec(cmd.object, onTick, onPhase);
-        specPromise.catch(() => {
-          /* handled below when awaited; prevents unhandled rejection */
-        });
-
-        await spoken;
-        if (!activeRef.current && !sessionRef.current) {
-          setAgentState("idle");
-        }
-        setBuilding((b) => (b ? { ...b, progress: Math.max(b.progress, 0.92) } : b));
-
-        try {
-          const spec = await specPromise;
-          const store = useInfinity.getState();
-          if (store.models.length >= MAX_MODELS) throw new Error("Workbench is full.");
-          store.addModel({
-            id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            name: spec.name,
-            spec,
-            pos: nextSlot(store.models.length),
-            rot: { x: 0.12, y: -0.55 },
-          });
-          setBuilding((b) => (b ? { ...b, name: spec.name, phase: "done", progress: 1 } : b));
-          await sleep(900);
-          setBuilding(null);
-          try {
-            await speak(`${spec.name} ready.`);
-          } catch {
-            /* best effort */
-          }
-        } catch (err) {
-          if (abortRef.current?.signal.aborted) {
-            setBuilding(null);
-            return;
-          }
-          const msg = err instanceof Error && err.message ? err.message : "The build failed.";
-          setError(msg);
-          toast.error(msg);
-          setBuilding((b) => (b ? { ...b, phase: "error", message: msg } : b));
-          await sleep(3500);
-          setBuilding(null);
-          try {
-            await speak("I couldn't build that.");
-          } catch {
-            /* best effort */
-          }
-        }
-        resumeAfterAction();
-      })();
-      return true;
     },
-    [pauseMic, resumeAfterAction, setAgentState, speak, streamSpec]
+    [pauseMic, resumeAfterAction, setAgentState, speak]
   );
 
   /** Intercept "delete the X" / "clear the workbench" while in workbench. */
@@ -814,7 +608,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       setError(null);
       pauseMic();
 
-      if (cmd.all) {
+      if ("all" in cmd) {
         const names = store.models.map((m) => m.name);
         store.clearModels();
         void (async () => {

@@ -189,3 +189,22 @@ Work Log:
 
 Stage Summary:
 - "Make a rocket ship" now CANNOT fail: it builds from a local three.js library in ~2s with a real part-by-part assembly animation, no network, no API key. The AI generator remains only as a bonus for objects outside the 17-model library.
+
+---
+Task ID: 16
+Agent: main (Z.ai Code)
+Task: User reported the build STILL said "I couldn't build that" — rebuild model building to be simpler and better per explicit instruction.
+
+Work Log:
+- Confirmed from dev.log the real provider path is unfixable at our layer: glm-4.5-flash streams die mid-generation on every spec prompt (`stream interrupted after 390-407 content chars / ~3000 reasoning chars`); the AI-generation architecture was the bug surface.
+- ARCHITECTURE REPLACED: model building is now 100% LOCAL three.js. No AI, no network, no API key, no failure path. The phrase "I couldn't build that" no longer exists anywhere in the codebase.
+- NEW src/lib/infinity/holo-generator.ts — deterministic seeded (mulberry32 + FNV-1a) procedural generator: creature (with per-animal mods: giraffe long neck, elephant bulk, bunny ears, dragon wings+spikes, unicorn horn, turtle shell…), bird, insect, figure (snowman/wizard/king/crown+hat+cape mods), fish (big variant), octopus (7 tentacles), flower, vehicle (heli/train/tank variants), and abstract archetypes (crystal/totem/orbiter/obelisk/bloom) for anything else. Same ask → same model, ~10-16 parts each, rounded 2-decimal coords, holo palettes.
+- holo.ts slimmed to normalizeHoloSpec + nextSlot + MAX_MODELS (deleted MODEL_GEN_SYSTEM, parseHoloSpec repair chain, createSpecStreamScanner — ~260 lines of AI-spec machinery).
+- use-infinity-agent.ts: deleted streamSpec (104 lines) and the entire AI branch of tryBuild (105 lines); tryBuild is now one path: `matchLibraryModel(object) ?? generateModel(object)` → spawn + part-by-part assembly progress; defensive catch toasts quietly (never speaks failure); "Add your API key to invent new models" gate removed (building is keyless).
+- Deleted src/app/api/model/route.ts (streaming spec generator route).
+- workbench-models.tsx: BuildingState.note removed; meta line is parts-only ("N/M PARTS · P%"); fixed pre-existing strict-TS errors (UseInfinityAgent.building missing from interface, DeleteCommand union narrowing via "all" in cmd).
+- bunx tsc --noEmit: clean (src/). bun run lint: clean.
+- E2E keyless (no API key anywhere), fresh session: "make me a rocket ship" → real mid-assembly progress "BUILDING ROCKET SHIP · 11/19 PARTS · 41%" → rocket spawned (VLM: cylinder fuselage, nose cone, fins, red/white/gold); "build me a giraffe" → generator creature (VLM: four legs, long neck, head with ears) "GIRAFFE READY · 13/13"; "make a pizza" → abstract hologram; reload + "open workbench" → all 3 restored (GIRAFFE/ROCKET SHIP/PIZZA); "delete the pizza" removed it; dev.log during entire session: ONLY /api/tts 200s — zero /api/model, zero /api/chat; zero page errors (only benign THREE.Clock deprecation warning); browser storage reset for fresh first-run.
+
+Stage Summary:
+- Building can no longer fail: every ask resolves instantly from the 17-model library or the seeded procedural generator, offline and keyless, in ~2s with real part-by-part assembly progress. Voice/text chat unchanged (/api/chat). The user's preview tab should be reloaded once to pick up the new bundle.

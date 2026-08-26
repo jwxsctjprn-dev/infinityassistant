@@ -12,21 +12,19 @@ export type BuildPhase = "building" | "done" | "error";
 export interface BuildingState {
   name: string;
   phase: BuildPhase;
-  /** Real completion target 0..1, derived from live stream events. */
+  /** Real completion target 0..1, synced to the on-screen part-by-part assembly. */
   progress: number;
-  /** Parts completed so far (from the stream scanner). */
+  /** Parts assembled so far. */
   partsDone: number;
-  /** Declared total parts, once the model has streamed its "count". */
+  /** Total parts in the model. */
   count: number | null;
-  /** Optional status note from the stream (e.g. "designing" while the AI thinks). */
-  note?: string;
   /** On failure: the human-readable reason (shown under BUILD FAILED). */
   message?: string;
 }
 
 /* ------------------------------------------------------------------ */
 /* Progress bar — driven by REAL generation events                      */
-/* (each completed part in the streamed spec bumps the target; the bar  */
+/* (the bar eases toward the real assembly target — never invents       */
 /*  only ever eases toward real targets, never invents completion)      */
 /* ------------------------------------------------------------------ */
 
@@ -66,11 +64,7 @@ function BuildProgress({ building }: { building: BuildingState }) {
     ? ""
     : building.count !== null
       ? `${Math.min(building.partsDone, building.count)}/${building.count} PARTS · ${pct}%`
-      : building.note
-        ? `${building.note.toUpperCase()} · ${pct}%`
-        : disp < 8
-          ? "CONNECTING"
-          : `${pct}%`;
+      : `${pct}%`;
 
   return (
     <motion.div

@@ -91,3 +91,19 @@ Work Log:
 
 Stage Summary:
 - Workbench mode shipped as pure visual stage. Voice phrase detection shares the exact code path as typed (verified typed path E2E; voice utterance capture itself needs a real mic). Ready for feature commands per user's next request.
+
+---
+Task ID: 10
+Agent: main (Z.ai Code)
+Task: Rework Workbench mode per user: delete 3D holographic scene; pure flat full-screen grid, sequential fade-to-black → grid, nothing else until exit.
+
+Work Log:
+- Deleted all 3D workbench visuals (perspective floor, horizon glow, projection pad, rings/dial CSS + WORKBENCH wordmark cross-fade).
+- workbench-grid.tsx → single full-screen div, .wb-grid: flat 2D grid of faint blue lines (48px cells), fades in/out 1s. Initial alpha 0.13 was invisible (VLM saw pure black) → raised to 0.25 (faint but clearly visible, VLM-verified).
+- next.config.ts → devIndicators:false (removed the Next.js "N" dev badge bottom-left for pure screen).
+- page.tsx sequencing: on workbench=true → hide input instantly, all chrome (orb/main, gear, wordmark, captions) fades to black over 700ms, gridVisible flips after 1000ms → only then grid fades in. E2E-verified: grid delayed during fade, present after; main/gear opacity 0; grid opacity 1; nothing visible but grid (VLM 4/4 checks).
+- Exit paths verified: Esc exits workbench first (before stopping session); typed "/ → exit workbench" over grid works (input auto-hidden on entry, summonable via /); voice path uses same tryWorkbench interception as before (unchanged).
+- Cleanup: storage reset for fresh first-run, lint clean, no console/page errors, dev.log healthy.
+
+Stage Summary:
+- Workbench is now exactly: everything fades to black → flat faint-blue full-screen grid → stays until "exit workbench"/Esc. Ready for grid-based features.

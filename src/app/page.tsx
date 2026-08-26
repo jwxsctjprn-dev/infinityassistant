@@ -49,8 +49,20 @@ export default function Home() {
     }
   }, [mounted, settingsOpen]);
 
+  // Workbench entry: fade everything to black first, THEN reveal the grid
+  const [gridVisible, setGridVisible] = useState(false);
+  useEffect(() => {
+    if (workbench) {
+      setInputVisible(false);
+      const t = setTimeout(() => setGridVisible(true), 1000);
+      return () => clearTimeout(t);
+    }
+    setGridVisible(false);
+  }, [workbench]);
+
   // Text sessions keep the input visible; voice listening hides it
   useEffect(() => {
+    if (workbench) return; // workbench controls its own visibility
     if (!agent.sessionActive) {
       setInputVisible(false);
     } else if (agent.mode === "text") {
@@ -58,7 +70,7 @@ export default function Home() {
     } else if (agent.mode === "voice" && agent.state === "listening") {
       setInputVisible(false);
     }
-  }, [agent.mode, agent.sessionActive, agent.state]);
+  }, [agent.mode, agent.sessionActive, agent.state, workbench]);
 
   useEffect(() => {
     if (inputVisible) inputRef.current?.focus();
@@ -95,9 +107,15 @@ export default function Home() {
           if (agent.mode !== "text") setInputVisible(false);
           return;
         }
-        if (agent.sessionActive) agent.stop();
-        else if (workbench) setWorkbench(false);
-        else setInputVisible(false);
+        if (workbench) {
+          setWorkbench(false);
+          return;
+        }
+        if (agent.sessionActive) {
+          agent.stop();
+          return;
+        }
+        setInputVisible(false);
         return;
       }
       if (
@@ -138,9 +156,7 @@ export default function Home() {
   const stateLabel = STATE_LABEL[agent.state];
 
   let hint = "";
-  if (workbench) {
-    hint = "";
-  } else if (!agent.sessionActive && !inputVisible) {
+  if (!agent.sessionActive && !inputVisible) {
     hint = configured ? "CLICK THE ORB TO TALK · PRESS / TO TYPE" : "OPEN SETTINGS TO ADD YOUR API KEY";
   } else if (agent.mode === "text" && agent.state === "idle") {
     hint = "TYPE BELOW · ENTER TO SEND";
@@ -148,8 +164,8 @@ export default function Home() {
 
   return (
     <div className="fixed inset-0 select-none overflow-hidden bg-black text-zinc-100">
-      {/* Workbench holographic grid (behind everything) */}
-      <AnimatePresence>{workbench && <WorkbenchGrid key="wb" />}</AnimatePresence>
+      {/* Workbench: flat grid only after everything has faded to black */}
+      <AnimatePresence>{gridVisible && <WorkbenchGrid key="wb" />}</AnimatePresence>
 
       {/* Settings */}
       <button
@@ -157,33 +173,28 @@ export default function Home() {
         aria-label="Settings (⌘,)"
         title="Settings (⌘,)"
         onClick={() => setSettingsOpen(true)}
-        className={`absolute right-5 top-5 z-20 rounded-full p-2.5 text-zinc-500 transition-all duration-1000 hover:bg-white/5 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/50 ${
+        className={`absolute right-5 top-5 z-20 rounded-full p-2.5 text-zinc-500 transition-all duration-700 hover:bg-white/5 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/50 ${
           workbench ? "pointer-events-none opacity-0" : "opacity-100"
         }`}
       >
         <Settings2 className="h-5 w-5" />
       </button>
 
-      {/* Wordmark: INFINITY ⇄ WORKBENCH */}
-      <div className="absolute left-1/2 top-6 z-20 h-5 -translate-x-1/2 text-[13px] font-light tracking-[0.45em]">
-        <span
-          className={`absolute left-1/2 -translate-x-1/2 whitespace-nowrap text-zinc-600 transition-opacity duration-1000 ${
-            workbench ? "opacity-0" : "opacity-100"
-          }`}
-        >
-          INFINITY
-        </span>
-        <span
-          className={`absolute left-1/2 -translate-x-1/2 whitespace-nowrap text-sky-500/40 transition-opacity duration-1000 ${
-            workbench ? "opacity-100" : "opacity-0"
-          }`}
-        >
-          WORKBENCH
-        </span>
-      </div>
+      {/* Wordmark */}
+      <p
+        className={`absolute left-1/2 top-6 z-20 -translate-x-1/2 text-[13px] font-light tracking-[0.45em] text-zinc-600 transition-opacity duration-700 ${
+          workbench ? "opacity-0" : "opacity-100"
+        }`}
+      >
+        INFINITY
+      </p>
 
-      {/* Orb */}
-      <main className="relative z-10 flex h-full w-full items-center justify-center">
+      {/* Orb + status (fades fully away in workbench) */}
+      <main
+        className={`relative z-10 flex h-full w-full items-center justify-center transition-opacity duration-700 ${
+          workbench ? "pointer-events-none opacity-0" : "opacity-100"
+        }`}
+      >
         <div className="flex flex-col items-center gap-10">
           <Orb state={agent.state} levelRef={agent.levelRef} onClick={handleToggle} />
 
@@ -231,7 +242,7 @@ export default function Home() {
       {/* Captions */}
       {mounted && captions && (
         <div
-          className={`pointer-events-none absolute inset-x-0 z-10 flex justify-center px-6 transition-opacity duration-1000 ${
+          className={`pointer-events-none absolute inset-x-0 z-10 flex justify-center px-6 transition-opacity duration-700 ${
             workbench ? "opacity-0" : "opacity-100"
           } ${inputVisible ? "bottom-24" : "bottom-8"}`}
         >
@@ -288,9 +299,7 @@ export default function Home() {
             exit={{ opacity: 0, y: 8 }}
             transition={{ duration: 0.2 }}
             onSubmit={submitText}
-            className={`absolute inset-x-0 bottom-0 z-20 flex justify-center px-6 pb-7 transition-opacity duration-1000 ${
-              workbench ? "opacity-50" : "opacity-100"
-            }`}
+            className="absolute inset-x-0 bottom-0 z-20 flex justify-center px-6 pb-7"
           >
             <input
               ref={inputRef}

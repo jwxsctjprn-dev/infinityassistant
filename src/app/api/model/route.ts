@@ -5,10 +5,21 @@
  * and long generations never hit a fixed-timeout wall.
  *
  * Event lines (one JSON object per line):
- *   {"t":"open"}                     — stream established (sent immediately)
- *   {"t":"delta","v":"..."}          — a piece of the model spec text
- *   {"t":"done","finish":"stop"}     — provider finished ("stop" | "length" | ...)
- *   {"t":"error","v":"message"}      — any failure before/while streaming
+ *   {"t":"open"}                      — stream established (sent immediately)
+ *   {"t":"ping"}                      — keepalive every 5s (proxies stay warm)
+ *   {"t":"phase","v":"designing"}     — provider is reasoning before output
+ *   {"t":"delta","v":"..."}           — a piece of the model spec text
+ *   {"t":"done","finish":"stop"}      — provider finished ("stop"|"length"|…)
+ *   {"t":"error","v":"message"}       — any failure before/while streaming
+ *
+ * Resilience (GLM-4.6 & friends can reason for minutes before output):
+ *   - keepalive pings every 5s so no gateway can idle-kill the connection
+ *   - 150s budget for the provider's FIRST byte (thinking/queue time)
+ *   - 35s idle watchdog DURING the stream (reset by every provider chunk)
+ *   - up to 3 attempts on transient failures (network, 429/5xx, empty stream)
+ *     — only retried while nothing has been forwarded to the client
+ *   - zai: asks GLM to skip deep thinking for structured output; if the
+ *     endpoint rejects the parameter (HTTP 400), retries once without it
  *
  * Pre-stream validation failures respond with normal JSON {ok:false,error}.
  * Credentials arrive per-request and are never stored.
@@ -21,9 +32,13 @@ import type { ProviderId } from "@/lib/infinity/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+interface ProviderDelta {
+  content?: unknown;
+  reasoning_content?: unknown;
+}
 interface ProviderStreamChunk {
   choices?: {
-    delta?: { content?: unknown };
+    delta?: ProviderDelta;
     finish_reason?: unknown;
   }[];
   error?: { message?: unknown };
@@ -53,6 +68,8 @@ function timeoutOrAbort(clientSignal: AbortSignal, ms: number): AbortSignal {
   );
   return ctl.signal;
 }
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function POST(req: NextRequest): Promise<Response> {
   // --- Parse body -----------------------------------------------------------
@@ -110,7 +127,10 @@ export async function POST(req: NextRequest): Promise<Response> {
     );
   }
 
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  };
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 
   const encoder = new TextEncoder();
@@ -121,14 +141,10 @@ export async function POST(req: NextRequest): Promise<Response> {
       let closed = false;
       let idleTimer: ReturnType<typeof setTimeout> | null = null;
       let hardTimer: ReturnType<typeof setTimeout> | null = null;
+      let keepAlive: ReturnType<typeof setInterval> | null = null;
+      let forwarded = false; // has any spec text been sent to the client?
       const readerRef: { current: ReadableStreamDefaultReader<Uint8Array> | null } = { current: null };
 
-      const cleanup = () => {
-        if (idleTimer) clearTimeout(idleTimer);
-        if (hardTimer) clearTimeout(hardTimer);
-        idleTimer = null;
-        hardTimer = null;
-      };
       const send = (obj: unknown) => {
         if (closed) return;
         try {
@@ -137,21 +153,33 @@ export async function POST(req: NextRequest): Promise<Response> {
           closed = true;
         }
       };
-      const fail = (msg: string) => {
+      const cleanup = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        if (hardTimer) clearTimeout(hardTimer);
+        if (keepAlive) clearInterval(keepAlive);
+        idleTimer = null;
+        hardTimer = null;
+        keepAlive = null;
+      };
+      const close = () => {
         if (closed) return;
-        send({ t: "error", v: msg });
         closed = true;
         cleanup();
-        try {
-          readerRef.current?.cancel().catch(() => undefined);
-        } catch {
-          /* noop */
-        }
         try {
           controller.close();
         } catch {
           /* already closed */
         }
+      };
+      const fail = (msg: string) => {
+        if (closed) return;
+        send({ t: "error", v: msg });
+        try {
+          readerRef.current?.cancel().catch(() => undefined);
+        } catch {
+          /* noop */
+        }
+        close();
       };
       const armIdle = () => {
         if (idleTimer) clearTimeout(idleTimer);
@@ -161,130 +189,178 @@ export async function POST(req: NextRequest): Promise<Response> {
         );
       };
 
-      // Hard budget for the whole generation (very generous — real builds
-      // stream continuously, so this only guards true zombies).
-      hardTimer = setTimeout(() => fail("The build took too long and was cancelled."), 300_000);
+      const extractDetail = async (res: Response): Promise<string> => {
+        const raw = await res.text().catch(() => "");
+        let detail = raw.slice(0, 300);
+        try {
+          const parsed = JSON.parse(raw) as ProviderStreamChunk;
+          if (parsed.error && typeof parsed.error.message === "string") {
+            detail = parsed.error.message.slice(0, 300);
+          }
+        } catch {
+          /* keep raw snippet */
+        }
+        return detail;
+      };
+
+      // Whisper every 5s so no proxy/gateway can idle-timeout this response
+      // while the provider thinks, queues, or retries.
+      keepAlive = setInterval(() => send({ t: "ping" }), 5_000);
+      hardTimer = setTimeout(() => fail("The build took too long and was cancelled."), 480_000);
+
+      const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+      const MAX_ATTEMPTS = 3;
 
       try {
-        // First byte leaves immediately — proxies/gateways never idle-timeout.
         send({ t: "open" });
 
-        const providerRes = await fetch(`${baseUrl}/chat/completions`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            model,
-            messages: [
-              { role: "system", content: MODEL_GEN_SYSTEM },
-              { role: "user", content: `Build a holographic model of: ${object}` },
-            ],
-            temperature: 0.7,
-            max_tokens: 4000,
-            stream: true,
-          }),
-          // 60s to first byte (provider queue), then the idle watchdog rules.
-          signal: timeoutOrAbort(req.signal, 60_000),
-        }).catch((err: unknown) => {
-          if (req.signal.aborted) throw new DOMException("Aborted", "AbortError");
-          throw err;
-        });
+        // GLM-4.6 reasons for a long time by default; for structured JSON we
+        // ask it to skip that. If the endpoint rejects the parameter, the
+        // 400-fallback below retries without it.
+        let extra: Record<string, unknown> =
+          provider === "zai" ? { thinking: { type: "disabled" } } : {};
 
-        if (!providerRes.ok) {
-          const raw = await providerRes.text().catch(() => "");
-          let detail = raw.slice(0, 300);
+        let succeeded = false;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS && !succeeded && !closed; attempt++) {
+          if (attempt > 1) {
+            send({ t: "ping" });
+            await sleep(700 * attempt);
+            if (closed || req.signal.aborted) return;
+          }
+
+          let providerRes: Response;
           try {
-            const parsed = JSON.parse(raw) as ProviderStreamChunk;
-            if (parsed.error && typeof parsed.error.message === "string") {
-              detail = parsed.error.message.slice(0, 300);
+            providerRes = await fetch(`${baseUrl}/chat/completions`, {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                model,
+                messages: [
+                  { role: "system", content: MODEL_GEN_SYSTEM },
+                  { role: "user", content: `Build a holographic model of: ${object}` },
+                ],
+                temperature: 0.7,
+                max_tokens: 3000,
+                stream: true,
+                ...extra,
+              }),
+              // 150s for the provider's first byte — covers long thinking.
+              signal: timeoutOrAbort(req.signal, 150_000),
+            });
+          } catch (err) {
+            if (req.signal.aborted) return; // client went away
+            if (err instanceof DOMException && err.name === "AbortError") {
+              // our first-byte timeout — worth another shot
+              if (attempt < MAX_ATTEMPTS) continue;
+              fail(`${info.label} took too long to start responding. Try again.`);
+              return;
             }
-          } catch {
-            /* keep raw snippet */
-          }
-          if (providerRes.status === 401 || providerRes.status === 403) {
-            fail(
-              `${info.label} rejected the API key (HTTP ${providerRes.status}) — the key looks invalid or unauthorized.` +
-                (info.keyUrl ? ` Get a valid key at ${info.keyUrl}.` : "") +
-                (detail ? ` ${info.label} says: ${detail}` : "")
-            );
-          } else {
-            fail(
-              `${info.label} request failed (HTTP ${providerRes.status}).` +
-                (detail ? ` ${info.label} says: ${detail}` : "")
-            );
-          }
-          return;
-        }
-
-        if (!providerRes.body) {
-          fail(`${info.label} returned no stream. Try again or switch models.`);
-          return;
-        }
-
-        const reader = providerRes.body.getReader();
-        readerRef.current = reader;
-        armIdle();
-
-        let buf = "";
-        let finish = "stop";
-        let sawContent = false;
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          armIdle(); // every chunk proves the provider is alive
-          buf += decoder.decode(value, { stream: true });
-
-          let nl: number;
-          while ((nl = buf.indexOf("\n")) >= 0) {
-            const line = buf.slice(0, nl).trim();
-            buf = buf.slice(nl + 1);
-            if (!line.startsWith("data:")) continue;
-            const payload = line.slice(5).trim();
-            if (!payload || payload === "[DONE]") continue;
-            try {
-              const chunk = JSON.parse(payload) as ProviderStreamChunk;
-              const choice = chunk.choices?.[0];
-              const content = choice?.delta?.content;
-              if (typeof content === "string" && content) {
-                sawContent = true;
-                send({ t: "delta", v: content });
-              }
-              if (choice && typeof choice.finish_reason === "string" && choice.finish_reason) {
-                finish = choice.finish_reason;
-              }
-            } catch {
-              /* keepalive / partial line — ignore */
-            }
-          }
-        }
-
-        if (!sawContent) {
-          fail(`${info.label} returned an empty stream. Try again or switch models.`);
-          return;
-        }
-        send({ t: "done", finish });
-      } catch (err) {
-        if (!closed) {
-          if (req.signal.aborted) {
-            closed = true; // client went away — nothing to report
-          } else if (err instanceof DOMException && err.name === "AbortError") {
-            fail(`${info.label} took too long to start responding. Try again.`);
-          } else {
+            if (attempt < MAX_ATTEMPTS) continue;
             fail(
               `Could not reach ${info.label} at ${baseUrl}. Check the base URL and your network, then try again.`
             );
+            return;
           }
+
+          if (!providerRes.ok) {
+            const status = providerRes.status;
+            const detail = await extractDetail(providerRes);
+            // Unknown-parameter style rejection → one clean retry without extras.
+            if (status === 400 && Object.keys(extra).length > 0) {
+              extra = {};
+              attempt--; // doesn't consume a retry slot
+              continue;
+            }
+            if (RETRYABLE.has(status) && attempt < MAX_ATTEMPTS) continue;
+            if (status === 401 || status === 403) {
+              fail(
+                `${info.label} rejected the API key (HTTP ${status}) — the key looks invalid or unauthorized.` +
+                  (info.keyUrl ? ` Get a valid key at ${info.keyUrl}.` : "") +
+                  (detail ? ` ${info.label} says: ${detail}` : "")
+              );
+            } else {
+              fail(
+                `${info.label} request failed (HTTP ${status}).` +
+                  (detail ? ` ${info.label} says: ${detail}` : "")
+              );
+            }
+            return;
+          }
+
+          if (!providerRes.body) {
+            if (attempt < MAX_ATTEMPTS) continue;
+            fail(`${info.label} returned no stream. Try again or switch models.`);
+            return;
+          }
+
+          const reader = providerRes.body.getReader();
+          readerRef.current = reader;
+          armIdle();
+
+          let buf = "";
+          let finish = "stop";
+          let sawOutput = false;
+          let sentDesigning = false;
+
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              armIdle(); // every provider chunk proves it's alive
+              buf += decoder.decode(value, { stream: true });
+
+              let nl: number;
+              while ((nl = buf.indexOf("\n")) >= 0) {
+                const line = buf.slice(0, nl).trim();
+                buf = buf.slice(nl + 1);
+                if (!line.startsWith("data:")) continue;
+                const payload = line.slice(5).trim();
+                if (!payload || payload === "[DONE]") continue;
+                try {
+                  const chunk = JSON.parse(payload) as ProviderStreamChunk;
+                  const choice = chunk.choices?.[0];
+                  const reasoning = choice?.delta?.reasoning_content;
+                  if (typeof reasoning === "string" && reasoning && !sentDesigning) {
+                    sentDesigning = true;
+                    send({ t: "phase", v: "designing" }); // still thinking, alive
+                  }
+                  const content = choice?.delta?.content;
+                  if (typeof content === "string" && content) {
+                    sawOutput = true;
+                    forwarded = true;
+                    send({ t: "delta", v: content });
+                  }
+                  if (choice && typeof choice.finish_reason === "string" && choice.finish_reason) {
+                    finish = choice.finish_reason;
+                  }
+                } catch {
+                  /* keepalive / partial line — ignore */
+                }
+              }
+            }
+          } catch {
+            if (closed) return; // idle watchdog already reported
+            fail(`The connection to ${info.label} was interrupted mid-build. Try again.`);
+            return;
+          } finally {
+            if (idleTimer) {
+              clearTimeout(idleTimer);
+              idleTimer = null;
+            }
+          }
+
+          if (sawOutput) {
+            send({ t: "done", finish });
+            succeeded = true;
+            break;
+          }
+          // 200 but zero content → usually a transient gateway blip
+          if (attempt < MAX_ATTEMPTS) continue;
+          fail(`${info.label} returned an empty stream. Try again or switch models.`);
+          return;
         }
       } finally {
-        cleanup();
-        if (!closed) {
-          closed = true;
-          try {
-            controller.close();
-          } catch {
-            /* already closed */
-          }
-        }
+        close();
       }
     },
   });

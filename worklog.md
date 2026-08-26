@@ -144,3 +144,18 @@ Work Log:
 
 Stage Summary:
 - Builds now stream end-to-end: no timeout wall, no raw JSON SyntaxErrors (safe parse + truncated-output repair/salvage), and the progress bar tracks ACTUAL completed parts in real time with an N/M PARTS readout.
+
+---
+Task ID: 13
+Agent: main (Z.ai Code)
+Task: Fix user's rocket-ship build failing with "error 502" + "I couldn't build that".
+
+Work Log:
+- ROOT CAUSE (dev.log): `POST /api/model 200 in 60s` — GLM-4.6 is a reasoning model; for a complex spec prompt it thinks for 60s+ before first output (user's normal chats: 3–8s). The old 60s first-byte budget aborted the provider call, and the browser connection sat silent after the open event → preview gateway idle-killed it with a 502 → "I couldn't build that."
+- /api/model v2 resilience: (1) keepalive `{"t":"ping"}` every 5s for the whole stream life — no proxy/gateway can idle-timeout the response again; (2) first-byte budget 60s→150s (thinking/queue time), hard cap 300s→480s; (3) auto-retry up to 3 attempts on network errors, 429/500/502/503/504, and empty streams — only while nothing has been forwarded to the client (stream integrity preserved); (4) provider=zai sends `thinking:{type:"disabled"}` so GLM skips deep reasoning for structured specs — if the endpoint 400s on the param, one immediate retry without extras (400-fallback doesn't consume a retry slot, can't loop: extras emptied); (5) `delta.reasoning_content` observed → forwards `{"t":"phase","v":"designing"}` so the client knows it's alive and thinking; Accept: text/event-stream header; max_tokens 4000→3000.
+- Client streamSpec: handles ping (ignored) + phase (onPhase callback); read-loop wrapped — on mid-stream connection drop it now SALVAGES whatever spec text already streamed (repair parser) instead of failing; friendly "connection was interrupted — your key and settings are fine" error when nothing usable arrived; also salvages on late stream errors after partial content.
+- Progress UI: BuildingState.note — meta line shows "DESIGNING · P%" while the AI reasons (before count/parts arrive), then N/M PARTS.
+- E2E via mock (deleted after): curl — flaky-502 mode retried transparently (open → ping during backoff → deltas, no error event); slowthink mode (6s reasoning deltas) emitted phase:designing + a ping between; browser — "make me a rocket ship" → real progress (11/14 PARTS · 64%) → Rocket Ship spawned center + persisted; "build a model of a flaky rocket ship" → 502 swallowed by retry, second model spawned, ZERO visible errors; "build a slowthink rocket" → "DESIGNING · 92%" shown during thinking → completed; 3 models in storage; mock + storage cleaned (fresh first-run), lint clean, dev.log all 200s.
+
+Stage Summary:
+- 502s are now handled at every layer: keepalives prevent gateway idle-kills, 150s first-byte budget accommodates reasoning, transient provider 502/5xx retried invisibly, zai thinking disabled for fast structured output, and interrupted builds salvage partial specs. The user's "make me a rocket ship" flow verified end-to-end against a simulated provider.

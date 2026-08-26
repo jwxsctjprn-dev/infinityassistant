@@ -501,7 +501,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
 
   /** Stream a model spec from /api/model, reporting live progress. */
   const streamSpec = useCallback(
-    async (object: string, onTick: (scan: SpecScan) => void): Promise<HoloSpec> => {
+    async (object: string, onTick: (scan: SpecScan) => void, onPhase?: (phase: string) => void): Promise<HoloSpec> => {
       const s = useInfinity.getState().settings;
       const ac = new AbortController();
       abortRef.current?.abort();
@@ -538,37 +538,65 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       const scanner = createSpecStreamScanner();
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let line = "";
+      let pending = "";
       let full = "";
       let streamErr: string | null = null;
+      let interrupted = false;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        line += decoder.decode(value, { stream: true });
-        let nl: number;
-        while ((nl = line.indexOf("\n")) >= 0) {
-          const rawLine = line.slice(0, nl).trim();
-          line = line.slice(nl + 1);
-          if (!rawLine) continue;
-          let ev: { t?: string; v?: string };
-          try {
-            ev = JSON.parse(rawLine) as { t?: string; v?: string };
-          } catch {
-            continue;
-          }
-          if (ev.t === "delta" && typeof ev.v === "string") {
-            full += ev.v;
-            scanner.feed(ev.v);
-            onTick(scanner.get());
-          } else if (ev.t === "error") {
-            streamErr = ev.v || "The model generator failed.";
+      const salvage = (): HoloSpec | null => {
+        if (!full.trim()) return null;
+        try {
+          return parseHoloSpec(full, object);
+        } catch {
+          return null;
+        }
+      };
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          pending += decoder.decode(value, { stream: true });
+          let nl: number;
+          while ((nl = pending.indexOf("\n")) >= 0) {
+            const rawLine = pending.slice(0, nl).trim();
+            pending = pending.slice(nl + 1);
+            if (!rawLine) continue;
+            let ev: { t?: string; v?: string };
+            try {
+              ev = JSON.parse(rawLine) as { t?: string; v?: string };
+            } catch {
+              continue;
+            }
+            if (ev.t === "delta" && typeof ev.v === "string") {
+              full += ev.v;
+              scanner.feed(ev.v);
+              onTick(scanner.get());
+            } else if (ev.t === "phase" && typeof ev.v === "string") {
+              onPhase?.(ev.v);
+            } else if (ev.t === "error") {
+              streamErr = ev.v || "The model generator failed.";
+            }
+            // "open" / "ping" / "done" need no client action
           }
         }
+      } catch {
+        if (ac.signal.aborted) throw new DOMException("Aborted", "AbortError");
+        interrupted = true;
       }
 
       if (ac.signal.aborted) throw new DOMException("Aborted", "AbortError");
-      if (streamErr) throw new Error(streamErr);
+
+      // The connection dropped or errored — if real content already streamed,
+      // salvage what arrived instead of wasting the whole build.
+      if (interrupted || streamErr) {
+        const saved = salvage();
+        if (saved) return saved;
+        if (streamErr) throw new Error(streamErr);
+        throw new Error(
+          "The connection to the model generator was interrupted. Try again — your key and settings are fine."
+        );
+      }
       if (!full.trim()) {
         throw new Error("The model generator returned nothing. Try again or switch models.");
       }
@@ -636,6 +664,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
                   progress: Math.max(b.progress, p),
                   partsDone: sc.partsSeen,
                   count: sc.count,
+                  note: sc.count !== null ? undefined : b.note,
                   name: b.name === cmd.object && sc.name ? sc.name : b.name,
                 }
               : b
@@ -645,7 +674,10 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         const spoken = speak("OK, building that now.").catch(() => {
           /* best effort */
         });
-        const specPromise = streamSpec(cmd.object, onTick);
+        const onPhase = (phase: string) => {
+          setBuilding((b) => (b ? { ...b, note: phase } : b));
+        };
+        const specPromise = streamSpec(cmd.object, onTick, onPhase);
         specPromise.catch(() => {
           /* handled below when awaited; prevents unhandled rejection */
         });

@@ -17,6 +17,8 @@ export interface BuildingState {
   partsDone: number;
   /** Declared total parts, once the model has streamed its "count". */
   count: number | null;
+  /** Optional status note from the stream (e.g. "designing" while the AI thinks). */
+  note?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -61,9 +63,11 @@ function BuildProgress({ building }: { building: BuildingState }) {
     ? ""
     : building.count !== null
       ? `${Math.min(building.partsDone, building.count)}/${building.count} PARTS · ${pct}%`
-      : disp < 8
-        ? "CONNECTING"
-        : `${pct}%`;
+      : building.note
+        ? `${building.note.toUpperCase()} · ${pct}%`
+        : disp < 8
+          ? "CONNECTING"
+          : `${pct}%`;
 
   return (
     <motion.div

@@ -19,7 +19,9 @@ const STATE_LABEL: Record<string, string> = {
 export default function Home() {
   const [mounted, setMounted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [hasStarted, setHasStarted] = useState(false);
+  const [inputVisible, setInputVisible] = useState(false);
+  const [inputValue, setInputValue] = useState("");
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const captions = useInfinity((s) => s.settings.captions);
 
   const onNeedSettings = useCallback(() => setSettingsOpen(true), []);
@@ -44,53 +46,102 @@ export default function Home() {
     }
   }, [mounted, settingsOpen]);
 
+  // Text sessions keep the input visible; voice listening hides it
+  useEffect(() => {
+    if (!agent.sessionActive) {
+      setInputVisible(false);
+    } else if (agent.mode === "text") {
+      setInputVisible(true);
+    } else if (agent.mode === "voice" && agent.state === "listening") {
+      setInputVisible(false);
+    }
+  }, [agent.mode, agent.sessionActive, agent.state]);
+
+  useEffect(() => {
+    if (inputVisible) inputRef.current?.focus();
+  }, [inputVisible]);
+
   const handleToggle = useCallback(() => {
-    if (agent.sessionActive) setHasStarted(true);
     agent.toggle();
   }, [agent]);
 
-  // Keyboard: ⌘,/Ctrl+, opens settings · Space toggles conversation · Esc stops
+  const submitText = useCallback(
+    (e: React.FormEvent) => {
+      e.preventDefault();
+      const v = inputValue.trim();
+      if (!v) return;
+      setInputValue("");
+      agent.sendText(v);
+    },
+    [agent, inputValue]
+  );
+
+  // Keyboard: ⌘, settings · / type · Space toggles voice · Esc stops/hides
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const active = document.activeElement;
+      const inInput = active === inputRef.current;
       if ((e.metaKey || e.ctrlKey) && e.key === ",") {
         e.preventDefault();
         setSettingsOpen(true);
         return;
       }
-      if (e.key === "Escape" && agent.sessionActive) {
-        agent.stop();
+      if (e.key === "Escape") {
+        if (inInput) {
+          inputRef.current?.blur();
+          if (agent.mode !== "text") setInputVisible(false);
+          return;
+        }
+        if (agent.sessionActive) agent.stop();
+        else setInputVisible(false);
         return;
       }
-      if (e.code === "Space" && !e.repeat) {
-        const el = document.activeElement;
-        const typing =
-          el instanceof HTMLElement &&
-          (el.tagName === "INPUT" ||
-            el.tagName === "TEXTAREA" ||
-            el.tagName === "BUTTON" ||
-            el.isContentEditable);
-        if (typing || settingsOpen || document.querySelector('[role="dialog"]')) return;
+      if (
+        e.key === "/" &&
+        !inInput &&
+        !settingsOpen &&
+        !document.querySelector('[role="dialog"]')
+      ) {
+        e.preventDefault();
+        setInputVisible(true);
+        return;
+      }
+      if (
+        e.code === "Space" &&
+        !e.repeat &&
+        !inInput &&
+        !inputVisible &&
+        !settingsOpen &&
+        !document.querySelector('[role="dialog"]')
+      ) {
+        if (
+          active instanceof HTMLElement &&
+          (active.tagName === "BUTTON" ||
+            active.tagName === "INPUT" ||
+            active.tagName === "TEXTAREA" ||
+            active.isContentEditable)
+        )
+          return;
         e.preventDefault();
         handleToggle();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [agent, handleToggle, settingsOpen]);
+  }, [agent, handleToggle, inputVisible, settingsOpen]);
 
   const configured = mounted ? isConfigured(useInfinity.getState().settings) : false;
-  const showHint = !agent.sessionActive && !hasStarted;
   const stateLabel = STATE_LABEL[agent.state];
+
+  let hint = "";
+  if (!agent.sessionActive && !inputVisible) {
+    hint = configured ? "CLICK THE ORB TO TALK · PRESS / TO TYPE" : "OPEN SETTINGS TO ADD YOUR API KEY";
+  } else if (agent.mode === "text" && agent.state === "idle") {
+    hint = "TYPE BELOW · ENTER TO SEND";
+  }
 
   return (
     <div className="fixed inset-0 select-none overflow-hidden bg-black text-zinc-100">
-      {/* macOS window dots */}
-      <div aria-hidden className="absolute left-5 top-5 flex items-center gap-2">
-        <span className="h-3 w-3 rounded-full bg-[#ff5f57]/90" />
-        <span className="h-3 w-3 rounded-full bg-[#febc2e]/90" />
-        <span className="h-3 w-3 rounded-full bg-[#28c840]/90" />
-      </div>
-
       {/* Settings */}
       <button
         type="button"
@@ -112,7 +163,7 @@ export default function Home() {
         <div className="flex flex-col items-center gap-10">
           <Orb state={agent.state} levelRef={agent.levelRef} onClick={handleToggle} />
 
-          <div className="flex h-4 items-center justify-center" aria-live="polite">
+          <div className="flex min-h-10 max-w-md flex-col items-center gap-2" aria-live="polite">
             <AnimatePresence mode="wait">
               {stateLabel ? (
                 <motion.span
@@ -125,28 +176,41 @@ export default function Home() {
                 >
                   {stateLabel}
                 </motion.span>
-              ) : showHint ? (
+              ) : hint ? (
                 <motion.span
-                  key="hint"
+                  key={hint}
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0.4 }}
-                  className="text-[11px] font-light tracking-[0.2em] text-zinc-500"
+                  className="text-center text-[11px] font-light tracking-[0.2em] text-zinc-500"
                 >
-                  {configured
-                    ? "CLICK THE ORB TO TALK"
-                    : "OPEN SETTINGS TO ADD YOUR API KEY"}
+                  {hint}
                 </motion.span>
               ) : null}
             </AnimatePresence>
+
+            {agent.error && (
+              <motion.p
+                key={agent.error}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="max-w-sm text-center text-[11px] leading-relaxed text-red-400/80"
+              >
+                {agent.error}
+              </motion.p>
+            )}
           </div>
         </div>
       </main>
 
       {/* Captions */}
       {mounted && captions && (
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center px-6 pb-8">
+        <div
+          className={`pointer-events-none absolute inset-x-0 flex justify-center px-6 ${
+            inputVisible ? "bottom-24" : "bottom-8"
+          }`}
+        >
           <div className="max-w-xl space-y-1.5 text-center" aria-live="polite">
             <AnimatePresence>
               {agent.sessionActive && agent.state === "listening" && agent.interim && (
@@ -171,7 +235,9 @@ export default function Home() {
                   {agent.lastUser}
                 </motion.p>
               )}
-              {(agent.state === "speaking" || agent.state === "listening") &&
+              {(agent.state === "speaking" ||
+                agent.state === "listening" ||
+                (agent.mode === "text" && agent.state === "idle")) &&
                 agent.lastReply && (
                   <motion.p
                     key={agent.lastReply}
@@ -187,6 +253,33 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      {/* Text input (press / anytime, or automatic when mic is unavailable) */}
+      <AnimatePresence>
+        {inputVisible && (
+          <motion.form
+            key="textinput"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{ duration: 0.2 }}
+            onSubmit={submitText}
+            className="absolute inset-x-0 bottom-0 flex justify-center px-6 pb-7"
+          >
+            <input
+              ref={inputRef}
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              maxLength={500}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="Type to Infinity · Enter to send"
+              aria-label="Type a message to Infinity"
+              className="w-full max-w-sm rounded-full border border-white/10 bg-white/[0.06] px-5 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500/40 focus:outline-none"
+            />
+          </motion.form>
+        )}
+      </AnimatePresence>
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
 

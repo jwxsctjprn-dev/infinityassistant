@@ -59,3 +59,19 @@ Work Log:
 
 Stage Summary:
 - App complete and browser-verified. Not verifiable in sandbox (no mic hardware / no real key): live STT capture, real LLM reply playback — all their code paths proxy-verified via curl + browser.
+
+---
+Task ID: 8
+Agent: main (Z.ai Code)
+Task: Fix "doesn't respond/talk back" + remove traffic lights.
+
+Work Log:
+- ROOT CAUSE found in use-infinity-agent.ts: setState("listening") + beginListening() ran in the same tick, but beginListening guards on stateRef.current which only updated in a post-render effect → after the first AI reply finished speaking, recognition never resumed → app went dead.
+- Rewrote hook: setAgentState() updates ref+state synchronously; single runTurn() used by both voice and text paths; resume-after-speech goes listening(voice)/idle(text).
+- Robustness: typing fallback (press / anytime) that runs the same chat→TTS pipeline; mic denied/unsupported/STT network errors auto-degrade voice session to text session with a persistent error line under the orb (toast too); interim-result stability finalizer (1.7s) for browsers that stall finals; audio playback watchdogs so a blocked/hung player never freezes the loop; chat/TTS errors no longer kill the session — they show the error and return to ready.
+- page.tsx: removed macOS traffic lights; added minimal text input (bottom, / to toggle), persistent red error line, adaptive hints ("CLICK THE ORB TO TALK · PRESS / TO TYPE" / "TYPE BELOW · ENTER TO SEND"), captions shift up when input visible.
+- E2E (agent-browser + self-hosted temp mock LLM inside dev server at /api/devmock, since sandbox reaps background processes): typed turn → THINKING → SPEAKING (real /api/tts 200 mp3) → ready; multi-turn verified (2+ turns, 16 successful chat/tts 200s); orb click with mic denied → automatic text fallback with guidance; traffic lights confirmed gone from DOM; fresh first-run restored (storage cleared, mock route deleted).
+- bun run lint clean; dev.log clean.
+
+Stage Summary:
+- Conversation loop fixed and browser-verified end to end incl. failure modes. Voice STT itself still needs a real mic (open preview in new tab); typing path guarantees working conversation everywhere.

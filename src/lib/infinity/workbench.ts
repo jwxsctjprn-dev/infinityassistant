@@ -37,10 +37,14 @@ export function matchWorkbenchCommand(input: string): WorkbenchAction | null {
 
 export interface BuildCommand {
   object: string;
+  /** True when the user explicitly asked the AI to invent it ("design a…" /
+   *  "invent a…") — skips the local builders when a key is configured. */
+  forceDesign?: boolean;
 }
 
-const BUILD_VERB_RE = /\b(build|create|make|generate|construct|design|assemble)\b/;
-const BUILD_VERB_FIRST_RE = /^(?:build|create|make|generate|construct|design|assemble)\b/;
+const BUILD_VERB_RE = /\b(build|create|make|generate|construct|design|assemble|invent)\b/;
+const BUILD_VERB_FIRST_RE = /^(?:build|create|make|generate|construct|design|assemble|invent)\b/;
+const FORCE_DESIGN_RE = /\b(design|invent)\b/;
 
 /** Words that mean the user wants to EDIT/tweak, not build something new. */
 const NON_BUILD_WORDS = new Set([
@@ -80,7 +84,7 @@ export function matchBuildCommand(input: string, inWorkbench = false): BuildComm
       object = m[1];
     } else {
       m = t.match(
-        /\b(?:build|create|make|generate|construct|design|assemble)\s+(?:me\s+)?(?:a|an|the|some)?\s*(.+?)\s+model(?:\s+of\s+(.+))?$/
+        /\b(?:build|create|make|generate|construct|design|assemble|invent)\s+(?:me\s+)?(.+?)\s+model(?:\s+of\s+(.+))?$/
       );
       if (m) object = m[2] || m[1] || "";
     }
@@ -91,8 +95,10 @@ export function matchBuildCommand(input: string, inWorkbench = false): BuildComm
     !/\b(workbench|delete|remove|clear)\b/.test(t)
   ) {
     // "build a cube" / "make me a vintage red telephone" / "design a dragon"
+    // (articles are stripped AFTER — an inline (?:a|an)? group would eat
+    // just the "a" of "an accordion" and leave "n accordion")
     const m = t.match(
-      /\b(?:build|create|make|generate|construct|design|assemble)\s+(?:me\s+)?(?:a|an|the|some)?\s*(.+)$/
+      /\b(?:build|create|make|generate|construct|design|assemble|invent)\s+(?:me\s+)?(.+)$/
     );
     if (m) object = m[1] || "";
     if (object) {
@@ -108,10 +114,10 @@ export function matchBuildCommand(input: string, inWorkbench = false): BuildComm
   object = object
     .replace(/\b(please|for me|now|quickly|holographic|hologram|3d|again)\b/g, "")
     .replace(/\s+/g, " ")
-    .replace(/^(a|an|the)\s+/, "")
+    .replace(/^(a|an|the|some)\s+/, "")
     .trim();
   if (!object || object.split(" ").length > 6) return null;
-  return { object };
+  return { object, forceDesign: FORCE_DESIGN_RE.test(t) };
 }
 
 export type DeleteCommand = { all: true } | { name: string };

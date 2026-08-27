@@ -1713,8 +1713,108 @@ function titleCase(s: string): string {
 }
 
 /**
+ * The family-routing chain shared by matchFamilyModel/generateModel.
+ * Returns the family's parts, or null when no real family matches —
+ * the caller decides what that means (AI design vs abstract fallback).
+ * Deterministic: same seed → same rand consumption → same parts.
+ */
+function routeFamily(rand: Rand, words: string[], pal: string[]): HoloPart[] | null {
+  /** match a word set using raw then singularized tokens */
+  const keyOf = (set: Set<string>): string | null =>
+    words.find((w) => set.has(w) || set.has(sing(w))) ?? null;
+  const has = (set: Set<string>) => keyOf(set) !== null;
+  const key = (set: Set<string>) => keyOf(set) ?? "";
+
+  if (has(SCREEN_WORDS)) {
+    return screens(rand, SCREEN_KIND[key(SCREEN_WORDS)]);
+  } else if (has(SEATING_WORDS)) {
+    return seating(rand, SEAT_MODS[key(SEATING_WORDS)] ?? { back: true }, WOODISH());
+  } else if (has(FOOD_WORDS)) {
+    return foodFam(rand, FOOD_KIND[key(FOOD_WORDS)]);
+  } else if (has(KITCHEN_WORDS)) {
+    return kitchenFam(rand, KITCHEN_KIND[key(KITCHEN_WORDS)]);
+  } else if (has(WEAR_WORDS)) {
+    return wearFam(rand, WEAR_KIND[key(WEAR_WORDS)]);
+  } else if (has(TOOL_WORDS)) {
+    return toolFam(rand, key(TOOL_WORDS));
+  } else if (has(LADDER_WORDS)) {
+    return ladderFam(rand);
+  } else if (has(TABLE_WORDS)) {
+    return tableFam(rand, key(TABLE_WORDS) === "desk" ? "desk" : key(TABLE_WORDS) === "nightstand" ? "night" : "table");
+  } else if (has(BED_WORDS)) {
+    return bedFam(rand, pal);
+  } else if (has(STORAGE_WORDS)) {
+    return storageFam(rand, STORAGE_MODS[key(STORAGE_WORDS)] ?? {});
+  } else if (has(STRING_WORDS)) {
+    const k = key(STRING_WORDS);
+    return strings(rand, k === "electric" ? "guitar" : k);
+  } else if (has(PIANO_WORDS)) {
+    return pianoFam(rand);
+  } else if (has(DRUM_WORDS)) {
+    return drumFam(rand, key(DRUM_WORDS) === "drums");
+  } else if (has(WIND_WORDS)) {
+    return windFam(rand, key(WIND_WORDS));
+  } else if (has(MIC_WORDS)) {
+    return micFam(rand);
+  } else if (has(VEHICLE_WORDS)) {
+    return vehicle(rand, VEHICLE_MODS[key(VEHICLE_WORDS)] ?? {}, pal);
+  } else if (has(STRUCT_WORDS)) {
+    const k = key(STRUCT_WORDS);
+    return k === "mailbox" ? mailboxFam() : structFam(rand, k === "box" ? "crate" : k);
+  } else if (has(TOY_WORDS)) {
+    return toyFam(rand, TOY_KIND[key(TOY_WORDS)]);
+  } else if (has(NATURE_WORDS)) {
+    const k = key(NATURE_WORDS);
+    return natureFam(rand, k === "planet-earth" ? "earth" : k);
+  } else if (has(CREATURE_WORDS)) {
+    return creature(rand, CREATURE_MODS[key(CREATURE_WORDS)] ?? jitterMods(rand), pal);
+  } else if (has(BIRD_WORDS)) {
+    return bird(rand, pal);
+  } else if (has(INSECT_WORDS)) {
+    return insect(rand, pal);
+  } else if (has(FIGURE_WORDS)) {
+    return figure(rand, FIGURE_MODS[key(FIGURE_WORDS)] ?? {}, pal);
+  } else if (has(FISH_WORDS)) {
+    return fish(rand, words.some((w) => ["whale", "orca", "shark"].includes(w)), pal);
+  } else if (has(OCTOPUS_WORDS)) {
+    return octopus(rand, pal);
+  } else if (has(FLOWER_WORDS)) {
+    return flower(rand, pal);
+  }
+  return null; // nothing the local builders recognize
+}
+
+/**
+ * Match a REAL local family for the object (word-set routing; exact phrases
+ * and the hand-authored library are checked separately by the caller).
+ * Returns null when the object isn't something the local builders know —
+ * i.e. generateModel() would fall back to abstract archetypes for it.
+ * Deterministic: same ask → same model, byte-for-byte.
+ */
+export function matchFamilyModel(object: string): HoloSpec | null {
+  const clean = normalizeAsk(object);
+  if (!clean) return null;
+  const words = clean.split(" ").filter(Boolean);
+  const seed = hashString(clean);
+  const rand = mulberry32(seed);
+  const pal = [...pick(rand, PALETTES)];
+
+  let parts: HoloPart[] | null = null;
+  try {
+    parts = routeFamily(rand, words, pal);
+  } catch {
+    return null; // a family builder glitched — treat as unknown
+  }
+  if (!parts || parts.length === 0) return null;
+  return normalizeHoloSpec(titleCase(clean), parts);
+}
+
+/**
  * Deterministically turn any object description into a hologram spec.
- * Never throws, never touches the network.
+ * Never throws, never touches the network. Unknown objects get a seeded
+ * abstract archetype (crystal/totem/orbiter/obelisk/bloom) so a model
+ * ALWAYS spawns — but prefer matchFamilyModel() when the caller wants to
+ * know whether the object was actually recognized locally.
  */
 export function generateModel(object: string): HoloSpec {
   const clean = normalizeAsk(object);
@@ -1723,77 +1823,13 @@ export function generateModel(object: string): HoloSpec {
   const rand = mulberry32(seed);
   const pal = [...pick(rand, PALETTES)];
 
-  /** match a word set using raw then singularized tokens */
-  const keyOf = (set: Set<string>): string | null =>
-    words.find((w) => set.has(w) || set.has(sing(w))) ?? null;
-  const has = (set: Set<string>) => keyOf(set) !== null;
-
-  let parts: HoloPart[];
+  let parts: HoloPart[] | null = null;
   try {
-    const key = (set: Set<string>) => keyOf(set) ?? "";
-    if (has(SCREEN_WORDS)) {
-      parts = screens(rand, SCREEN_KIND[key(SCREEN_WORDS)]);
-    } else if (has(SEATING_WORDS)) {
-      parts = seating(rand, SEAT_MODS[key(SEATING_WORDS)] ?? { back: true }, WOODISH());
-    } else if (has(FOOD_WORDS)) {
-      parts = foodFam(rand, FOOD_KIND[key(FOOD_WORDS)]);
-    } else if (has(KITCHEN_WORDS)) {
-      parts = kitchenFam(rand, KITCHEN_KIND[key(KITCHEN_WORDS)]);
-    } else if (has(WEAR_WORDS)) {
-      parts = wearFam(rand, WEAR_KIND[key(WEAR_WORDS)]);
-    } else if (has(TOOL_WORDS)) {
-      parts = toolFam(rand, key(TOOL_WORDS));
-    } else if (has(LADDER_WORDS)) {
-      parts = ladderFam(rand);
-    } else if (has(TABLE_WORDS)) {
-      parts = tableFam(rand, key(TABLE_WORDS) === "desk" ? "desk" : key(TABLE_WORDS) === "nightstand" ? "night" : "table");
-    } else if (has(BED_WORDS)) {
-      parts = bedFam(rand, pal);
-    } else if (has(STORAGE_WORDS)) {
-      parts = storageFam(rand, STORAGE_MODS[key(STORAGE_WORDS)] ?? {});
-    } else if (has(STRING_WORDS)) {
-      const k = key(STRING_WORDS);
-      parts = strings(rand, k === "electric" ? "guitar" : k);
-    } else if (has(PIANO_WORDS)) {
-      parts = pianoFam(rand);
-    } else if (has(DRUM_WORDS)) {
-      parts = drumFam(rand, key(DRUM_WORDS) === "drums");
-    } else if (has(WIND_WORDS)) {
-      parts = windFam(rand, key(WIND_WORDS));
-    } else if (has(MIC_WORDS)) {
-      parts = micFam(rand);
-    } else if (has(VEHICLE_WORDS)) {
-      parts = vehicle(rand, VEHICLE_MODS[key(VEHICLE_WORDS)] ?? {}, pal);
-    } else if (has(STRUCT_WORDS)) {
-      const k = key(STRUCT_WORDS);
-      parts = k === "mailbox" ? mailboxFam() : structFam(rand, k === "box" ? "crate" : k);
-    } else if (has(TOY_WORDS)) {
-      parts = toyFam(rand, TOY_KIND[key(TOY_WORDS)]);
-    } else if (has(NATURE_WORDS)) {
-      const k = key(NATURE_WORDS);
-      parts = natureFam(rand, k === "planet-earth" ? "earth" : k);
-    } else if (has(CREATURE_WORDS)) {
-      parts = creature(rand, CREATURE_MODS[key(CREATURE_WORDS)] ?? jitterMods(rand), pal);
-    } else if (has(BIRD_WORDS)) {
-      parts = bird(rand, pal);
-    } else if (has(INSECT_WORDS)) {
-      parts = insect(rand, pal);
-    } else if (has(FIGURE_WORDS)) {
-      parts = figure(rand, FIGURE_MODS[key(FIGURE_WORDS)] ?? {}, pal);
-    } else if (has(FISH_WORDS)) {
-      parts = fish(rand, words.some((w) => ["whale", "orca", "shark"].includes(w)), pal);
-    } else if (has(OCTOPUS_WORDS)) {
-      parts = octopus(rand, pal);
-    } else if (has(FLOWER_WORDS)) {
-      parts = flower(rand, pal);
-    } else {
-      parts = pick(rand, ABSTRACTS)(rand, pal);
-    }
+    parts = routeFamily(rand, words, pal);
   } catch {
-    parts = crystal(rand, [...PALETTES[0]]);
+    /* fall through to the abstract fallback */
   }
-
-  if (!parts || parts.length === 0) parts = crystal(rand, [...PALETTES[0]]);
+  if (!parts || parts.length === 0) parts = pick(rand, ABSTRACTS)(rand, pal);
   return normalizeHoloSpec(titleCase(clean) || "Hologram", parts);
 }
 

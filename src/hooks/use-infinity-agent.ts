@@ -12,7 +12,7 @@ import {
 } from "@/lib/infinity/workbench";
 import { MAX_MODELS, nextSlot, SPAWN_SETTLE_MS } from "@/lib/infinity/holo";
 import { ASSEMBLE_MS, matchLibraryModel } from "@/lib/infinity/holo-library";
-import { generateModel, matchPhraseModel } from "@/lib/infinity/holo-generator";
+import { generateModel, matchFamilyModel, matchPhraseModel } from "@/lib/infinity/holo-generator";
 import { cacheGetSpec, cachePutSpec, designHoloSpec } from "@/lib/infinity/holo-ai";
 import type { HoloSpec } from "@/lib/infinity/types";
 import type { BuildingState } from "@/components/infinity/workbench-models";
@@ -501,9 +501,10 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-  /** Intercept "build a model of X" — designs via the user's AI when a key is
-   *  configured (ANY object in the world), falls back to local builders so a
-   *  model always spawns. Speaks, shows progress, persists. */
+  /** Intercept "build a model of X" — LOCAL builders first (instant, offline,
+   *  keyless); the user's AI only designs objects the local system doesn't
+   *  know (or when explicitly asked to design/invent). A model always spawns.
+   *  Speaks, shows progress, persists. */
   const tryBuild = useCallback(
     (raw: string): boolean => {
       const cmd = matchBuildCommand(raw, useInfinity.getState().workbench);
@@ -524,12 +525,26 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
 
       void (async () => {
         const settings = useInfinity.getState().settings;
+        const keyReady = isConfigured(settings);
 
-        // 1) Cached design → identical model, instantly.
-        let spec: HoloSpec | null = cacheGetSpec(cmd.object);
+        // 1) LOCAL FIRST — phrases → library → families. Instant, offline,
+        //    deterministic. Skipped only when the user explicitly asks the
+        //    AI to design it AND a key is configured.
+        let spec: HoloSpec | null = null;
+        if (!cmd.forceDesign || !keyReady) {
+          spec =
+            matchPhraseModel(cmd.object) ??
+            matchLibraryModel(cmd.object) ??
+            matchFamilyModel(cmd.object);
+        }
+
+        // 2) Cached AI designs — an object the locals DON'T know, asked for
+        //    before: identical model, instantly, zero API calls.
+        if (!spec) spec = cacheGetSpec(cmd.object);
+
         let designed = false;
         let designFailed = false;
-        const willDesign = !spec && isConfigured(settings);
+        const willDesign = !spec && keyReady;
 
         const spoken = speak(willDesign ? "OK, designing that now." : "OK, building that now.").catch(
           () => {
@@ -537,7 +552,9 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
           }
         );
 
-        // 2) AI design — the user's LLM invents the object from scratch.
+        // 3) AI design — the user's LLM invents the object from scratch.
+        //    Only reached for objects the local builders don't recognize
+        //    (or when explicitly forced with "design a …").
         if (willDesign) {
           setBuilding({
             name: cmd.object,
@@ -584,9 +601,10 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
           if (!spec) designFailed = true;
         }
 
-        // 3) Local builders guarantee a model: phrases → library → families.
+        // 4) Abstract archetypes guarantee a model — no key, no network,
+        //    nothing recognized: still spawns a seeded hologram.
         if (!spec) {
-          spec = matchPhraseModel(cmd.object) ?? matchLibraryModel(cmd.object) ?? generateModel(cmd.object);
+          spec = generateModel(cmd.object);
         }
 
         const finalSpec = spec;

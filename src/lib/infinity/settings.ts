@@ -2,7 +2,8 @@
 
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { HoloModel, Settings } from "./types";
+import type { Annotation, HoloModel, Settings } from "./types";
+import { DEFAULT_MARKER_COLOR } from "./types";
 import { PROVIDERS } from "./providers";
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -22,6 +23,13 @@ interface InfinityStore {
   workbench: boolean;
   /** Models placed on the workbench (persisted) */
   models: HoloModel[];
+  /** Marker strokes drawn on the bench (persisted, viewport-normalized) */
+  annotations: Annotation[];
+  /** Selected marker color (persisted) */
+  drawColor: string;
+  /** True while the user is in draw mode — the canvas catches pointer
+   *  events instead of the models (session state — not persisted). */
+  drawing: boolean;
   setSettings: (patch: Partial<Settings>) => void;
   resetSettings: () => void;
   setWorkbench: (v: boolean) => void;
@@ -32,6 +40,11 @@ interface InfinityStore {
     id: string,
     patch: Partial<Pick<HoloModel, "pos" | "rot" | "scale" | "spec" | "name" | "pending">>
   ) => void;
+  setDrawing: (v: boolean) => void;
+  setDrawColor: (c: string) => void;
+  addAnnotation: (a: Annotation) => void;
+  undoAnnotation: () => void;
+  clearAnnotations: () => void;
 }
 
 export const useInfinity = create<InfinityStore>()(
@@ -40,6 +53,9 @@ export const useInfinity = create<InfinityStore>()(
       settings: DEFAULT_SETTINGS,
       workbench: false,
       models: [],
+      annotations: [],
+      drawColor: DEFAULT_MARKER_COLOR,
+      drawing: false,
       setSettings: (patch) =>
         set((state) => ({ settings: { ...state.settings, ...patch } })),
       resetSettings: () => set({ settings: DEFAULT_SETTINGS }),
@@ -52,6 +68,17 @@ export const useInfinity = create<InfinityStore>()(
         set((state) => ({
           models: state.models.map((x) => (x.id === id ? { ...x, ...patch } : x)),
         })),
+      setDrawing: (v) => set({ drawing: v }),
+      setDrawColor: (c) => set({ drawColor: c }),
+      addAnnotation: (a) =>
+        set((state) => {
+          const next = [...state.annotations, a];
+          // Keep localStorage bounded — drop the oldest strokes past 120.
+          return { annotations: next.length > 120 ? next.slice(-120) : next };
+        }),
+      undoAnnotation: () =>
+        set((state) => ({ annotations: state.annotations.slice(0, -1) })),
+      clearAnnotations: () => set({ annotations: [] }),
     }),
     {
       name: "infinity-settings",
@@ -61,10 +88,22 @@ export const useInfinity = create<InfinityStore>()(
         // Models mid-design (progressive AI build) are session-only — a
         // reload must never resurrect a half-designed hologram.
         models: state.models.filter((m) => !m.pending),
+        annotations: state.annotations,
+        drawColor: state.drawColor,
       }),
       migrate: (state) => {
-        const s = state as { settings?: Settings; models?: HoloModel[] };
-        return { settings: s.settings ?? DEFAULT_SETTINGS, models: s.models ?? [] };
+        const s = state as {
+          settings?: Settings;
+          models?: HoloModel[];
+          annotations?: Annotation[];
+          drawColor?: string;
+        };
+        return {
+          settings: s.settings ?? DEFAULT_SETTINGS,
+          models: s.models ?? [],
+          annotations: s.annotations ?? [],
+          drawColor: s.drawColor ?? DEFAULT_MARKER_COLOR,
+        };
       },
     }
   )

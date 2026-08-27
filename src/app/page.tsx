@@ -7,6 +7,7 @@ import { Orb } from "@/components/infinity/orb";
 import { SettingsDialog } from "@/components/infinity/settings-dialog";
 import { WorkbenchGrid } from "@/components/infinity/workbench-grid";
 import { WorkbenchModels } from "@/components/infinity/workbench-models";
+import { WorkbenchDraw } from "@/components/infinity/workbench-draw";
 import { Toaster } from "@/components/ui/sonner";
 import { useInfinityAgent } from "@/hooks/use-infinity-agent";
 import { isConfigured, useInfinity } from "@/lib/infinity/settings";
@@ -99,6 +100,11 @@ export default function Home() {
           inputRef.current?.blur();
           return;
         }
+        // Drawing mode peels off first, then the workbench closes.
+        if (useInfinity.getState().drawing) {
+          useInfinity.getState().setDrawing(false);
+          return;
+        }
         if (workbench) {
           setWorkbench(false);
           return;
@@ -160,6 +166,8 @@ export default function Home() {
       {/* Workbench: flat grid only after everything has faded to black */}
       <AnimatePresence>{gridVisible && <WorkbenchGrid key="wb" />}</AnimatePresence>
       {gridVisible && <WorkbenchModels building={agent.building} />}
+      {/* Marker annotations + the floating marker tool (workbench only) */}
+      {gridVisible && <WorkbenchDraw />}
 
       {/* Settings */}
       <button

@@ -104,6 +104,35 @@ export interface HoloModel {
 export const HOLO_SCALE_MIN = 0.4;
 export const HOLO_SCALE_MAX = 2.5;
 
+/* ------------------------------------------------------------------ */
+/* Workbench annotations (marker drawing)                              */
+/* ------------------------------------------------------------------ */
+
+/** One point of a freehand stroke, normalized to 0..1 of the viewport. */
+export interface DrawPoint {
+  x: number;
+  y: number;
+}
+
+/** One committed marker stroke on the bench. */
+export interface Annotation {
+  color: string;
+  points: DrawPoint[];
+}
+
+/** Marker palette — bright hologram-friendly colors on the dark grid. */
+export const MARKER_COLORS: readonly string[] = [
+  "#f87171", // red
+  "#fb923c", // orange
+  "#facc15", // yellow
+  "#4ade80", // green
+  "#22d3ee", // cyan
+  "#f472b6", // pink
+  "#f4f4f5", // white
+] as const;
+
+export const DEFAULT_MARKER_COLOR = "#22d3ee";
+
 export const DEFAULT_SYSTEM_PROMPT =
   "You are Infinity, a warm, witty voice companion having a natural spoken conversation with the user. " +
   "Your replies are heard out loud, so keep them short and conversational — usually 1–3 sentences. " +

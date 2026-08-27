@@ -40,22 +40,30 @@ export interface BuildCommand {
 }
 
 const BUILD_VERB_RE = /\b(build|create|make|generate|construct|design|assemble)\b/;
+const BUILD_VERB_FIRST_RE = /^(?:build|create|make|generate|construct|design|assemble)\b/;
 
 /** Words that mean the user wants to EDIT/tweak, not build something new. */
 const NON_BUILD_WORDS = new Set([
   "it", "this", "that", "them", "bigger", "smaller", "larger", "taller", "shorter",
-  "red", "blue", "green", "yellow", "purple", "orange", "white", "black", "pink",
   "brighter", "darker", "faster", "slower", "spin", "spinning", "rotate", "turn",
   "move", "shift", "delete", "remove", "clear", "destroy", "workbench", "model",
 ]);
 
+/** Color words — legitimate inside an object ("red telephone") but a recolor
+ * request when they come LAST ("make the chair red"). */
+const COLOR_WORDS = new Set([
+  "red", "blue", "green", "yellow", "purple", "orange", "white", "black", "pink",
+  "gray", "grey", "brown", "gold", "silver", "cyan", "magenta",
+]);
+
 /**
  * "build a model of a lighthouse" / "create a 3d model of a treehouse" /
- * "make me a castle model" → { object: "lighthouse" | ... }
+ * "make me a castle model" / "make me a vintage red telephone" →
+ * { object: "lighthouse" | ... }
  *
- * Inside the workbench, the word "model" is optional: "build a cube",
- * "make me a sandcastle" also count. Outside it, "model" is required so
- * everyday conversation is never hijacked.
+ * Inside the workbench, the word "model" is optional. Outside it, the
+ * utterance must START with a build verb (so normal conversation is never
+ * hijacked, but "make me a rocket ship" always works).
  */
 export function matchBuildCommand(input: string, inWorkbench = false): BuildCommand | null {
   const t = input
@@ -77,23 +85,28 @@ export function matchBuildCommand(input: string, inWorkbench = false): BuildComm
       if (m) object = m[2] || m[1] || "";
     }
   } else if (
-    inWorkbench &&
     BUILD_VERB_RE.test(t) &&
-    t.split(" ").length <= 5 &&
+    (inWorkbench || BUILD_VERB_FIRST_RE.test(t)) &&
+    t.split(" ").length <= 8 &&
     !/\b(workbench|delete|remove|clear)\b/.test(t)
   ) {
-    // "build a cube" / "make me a sandcastle" (no "model" word needed)
+    // "build a cube" / "make me a vintage red telephone" / "design a dragon"
     const m = t.match(
       /\b(?:build|create|make|generate|construct|design|assemble)\s+(?:me\s+)?(?:a|an|the|some)?\s*(.+)$/
     );
     if (m) object = m[1] || "";
-    if (object && object.split(" ").some((w) => NON_BUILD_WORDS.has(w))) object = "";
+    if (object) {
+      const words = object.split(" ");
+      // "… red" at the END is a recolor request, not an object.
+      if (words.length > 0 && COLOR_WORDS.has(words[words.length - 1])) object = "";
+      else if (words.some((w) => NON_BUILD_WORDS.has(w))) object = "";
+    }
   }
 
   if (!object) return null;
 
   object = object
-    .replace(/\b(please|for me|now|quickly|holographic|hologram|3d)\b/g, "")
+    .replace(/\b(please|for me|now|quickly|holographic|hologram|3d|again)\b/g, "")
     .replace(/\s+/g, " ")
     .replace(/^(a|an|the)\s+/, "")
     .trim();

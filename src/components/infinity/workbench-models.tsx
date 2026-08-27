@@ -21,6 +21,8 @@ export interface BuildingState {
   partsDone: number;
   /** Total parts in the model. */
   count: number | null;
+  /** While the AI designs: "DESIGNING" or "N PARTS" (shown in the meta line). */
+  note?: string;
   /** On failure: the human-readable reason (shown under BUILD FAILED). */
   message?: string;
 }
@@ -65,9 +67,11 @@ function BuildProgress({ building }: { building: BuildingState }) {
   const pct = Math.round(disp);
   const meta = failed
     ? ""
-    : building.count !== null
-      ? `${Math.min(building.partsDone, building.count)}/${building.count} PARTS · ${pct}%`
-      : `${pct}%`;
+    : building.note
+      ? `${building.note} · ${pct}%`
+      : building.count !== null
+        ? `${Math.min(building.partsDone, building.count)}/${building.count} PARTS · ${pct}%`
+        : `${pct}%`;
 
   return (
     <motion.div

@@ -13,6 +13,8 @@ import {
 import { MAX_MODELS, nextSlot, SPAWN_SETTLE_MS } from "@/lib/infinity/holo";
 import { ASSEMBLE_MS, matchLibraryModel } from "@/lib/infinity/holo-library";
 import { generateModel, matchPhraseModel } from "@/lib/infinity/holo-generator";
+import { cacheGetSpec, cachePutSpec, designHoloSpec } from "@/lib/infinity/holo-ai";
+import type { HoloSpec } from "@/lib/infinity/types";
 import type { BuildingState } from "@/components/infinity/workbench-models";
 
 /**
@@ -499,7 +501,9 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-  /** Intercept "build a model of X" — speaks, shows progress, spawns model. */
+  /** Intercept "build a model of X" — designs via the user's AI when a key is
+   *  configured (ANY object in the world), falls back to local builders so a
+   *  model always spawns. Speaks, shows progress, persists. */
   const tryBuild = useCallback(
     (raw: string): boolean => {
       const cmd = matchBuildCommand(raw, useInfinity.getState().workbench);
@@ -515,87 +519,150 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         return true;
       }
 
-      // Everything builds LOCALLY with three.js: exact multiword phrases
-      // first, then the hand-authored library, then the procedural families.
-      // No network, no API key — a model is guaranteed to spawn.
-      const libSpec =
-        matchPhraseModel(cmd.object) ?? matchLibraryModel(cmd.object) ?? generateModel(cmd.object);
-      {
-        useInfinity.getState().setWorkbench(true);
-        pauseMic();
+      useInfinity.getState().setWorkbench(true);
+      pauseMic();
 
-        void (async () => {
+      void (async () => {
+        const settings = useInfinity.getState().settings;
+
+        // 1) Cached design → identical model, instantly.
+        let spec: HoloSpec | null = cacheGetSpec(cmd.object);
+        let designed = false;
+        let designFailed = false;
+        const willDesign = !spec && isConfigured(settings);
+
+        const spoken = speak(willDesign ? "OK, designing that now." : "OK, building that now.").catch(
+          () => {
+            /* best effort */
+          }
+        );
+
+        // 2) AI design — the user's LLM invents the object from scratch.
+        if (willDesign) {
           setBuilding({
-            name: libSpec.name,
+            name: cmd.object,
             phase: "building",
             progress: 0.06,
             partsDone: 0,
-            count: libSpec.parts.length,
+            count: null,
+            note: "DESIGNING",
           });
-
-          const spoken = speak("OK, building that now.").catch(() => {
-            /* best effort */
-          });
-
-          const store = useInfinity.getState();
-          store.addModel({
-            id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            name: libSpec.name,
-            spec: libSpec,
-            pos: nextSlot(store.models.length),
-            rot: { x: 0.12, y: -0.55 },
-            bornAt: Date.now(),
-          });
-
-          // Progress tracks the actual on-screen part-by-part assembly.
-          const t0 = performance.now();
-          const iv = window.setInterval(() => {
-            // Assembly starts once the card's spawn animation has settled
-            // (the 3D canvas mounts then — see SPAWN_SETTLE_MS).
-            const frac = Math.min(
-              1,
-              Math.max(0, (performance.now() - t0 - SPAWN_SETTLE_MS) / ASSEMBLE_MS)
-            );
+          // Gentle crawl while the model thinks (caps at 42%).
+          const crawl = window.setInterval(() => {
             setBuilding((b) =>
-              b
-                ? {
-                    ...b,
-                    progress: 0.08 + 0.87 * frac,
-                    partsDone: Math.round(frac * libSpec.parts.length),
-                  }
-                : b
+              b && b.note ? { ...b, progress: Math.min(0.42, b.progress + 0.005) } : b
             );
-            if (frac >= 1) window.clearInterval(iv);
-          }, 90);
-
-          await spoken;
-          if (!activeRef.current && !sessionRef.current) {
-            setAgentState("idle");
-          }
-          await sleep(
-            Math.max(0, SPAWN_SETTLE_MS + ASSEMBLE_MS + 400 - (performance.now() - t0))
-          );
-          window.clearInterval(iv);
-
-          setBuilding((b) => (b ? { ...b, phase: "done", progress: 1 } : b));
-          await sleep(650);
-          setBuilding(null);
+          }, 500);
           try {
-            await speak(`${libSpec.name} ready.`);
+            const out = await designHoloSpec({
+              object: cmd.object,
+              provider: settings.provider,
+              apiKey: settings.apiKey,
+              baseUrl: settings.baseUrl,
+              model: settings.model,
+              onProgress: (p) =>
+                setBuilding((b) =>
+                  b
+                    ? {
+                        ...b,
+                        note: p.phase === "thinking" ? "DESIGNING" : `${p.partsDesigned} PARTS`,
+                        progress: Math.max(b.progress, Math.min(0.45, p.progress)),
+                      }
+                    : b
+                ),
+            });
+            if (out?.spec) {
+              spec = out.spec;
+              designed = true;
+              if (!out.salvaged) cachePutSpec(cmd.object, out.spec);
+            }
           } catch {
-            /* best effort */
+            /* fall through to local builders */
+          } finally {
+            window.clearInterval(crawl);
           }
-          resumeAfterAction();
-        })().catch((err) => {
-          // Unreachable in practice — local geometry + speech can't fail.
-          // Keep it quiet and visible instead of ever saying "couldn't build".
-          console.error("build failed", err);
-          setBuilding(null);
-          toast.error("Something went wrong showing that model.");
-          resumeAfterAction();
+          if (!spec) designFailed = true;
+        }
+
+        // 3) Local builders guarantee a model: phrases → library → families.
+        if (!spec) {
+          spec = matchPhraseModel(cmd.object) ?? matchLibraryModel(cmd.object) ?? generateModel(cmd.object);
+        }
+
+        const finalSpec = spec;
+        const from = designed ? 0.45 : 0.08;
+
+        setBuilding({
+          name: finalSpec.name,
+          phase: "building",
+          progress: from,
+          partsDone: 0,
+          count: finalSpec.parts.length,
         });
-        return true;
-      }
+
+        const store = useInfinity.getState();
+        store.addModel({
+          id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          name: finalSpec.name,
+          spec: finalSpec,
+          pos: nextSlot(store.models.length),
+          rot: { x: 0.12, y: -0.55 },
+          bornAt: Date.now(),
+        });
+
+        // Progress tracks the actual on-screen part-by-part assembly.
+        const t0 = performance.now();
+        const iv = window.setInterval(() => {
+          // Assembly starts once the card's spawn animation has settled
+          // (the 3D canvas mounts then — see SPAWN_SETTLE_MS).
+          const frac = Math.min(
+            1,
+            Math.max(0, (performance.now() - t0 - SPAWN_SETTLE_MS) / ASSEMBLE_MS)
+          );
+          setBuilding((b) =>
+            b
+              ? {
+                  ...b,
+                  progress: from + (1 - from) * frac,
+                  partsDone: Math.round(frac * finalSpec.parts.length),
+                }
+              : b
+          );
+          if (frac >= 1) window.clearInterval(iv);
+        }, 90);
+
+        await spoken;
+        if (!activeRef.current && !sessionRef.current) {
+          setAgentState("idle");
+        }
+        await sleep(
+          Math.max(0, SPAWN_SETTLE_MS + ASSEMBLE_MS + 400 - (performance.now() - t0))
+        );
+        window.clearInterval(iv);
+
+        setBuilding((b) => (b ? { ...b, phase: "done", progress: 1 } : b));
+        await sleep(650);
+        setBuilding(null);
+        try {
+          await speak(`${finalSpec.name} ready.`);
+        } catch {
+          /* best effort */
+        }
+        if (designed) {
+          toast.success(`${finalSpec.name} — designed by AI`);
+        } else if (designFailed) {
+          toast("AI design unavailable — built a local model instead");
+        }
+        resumeAfterAction();
+      })().catch((err) => {
+        // Unreachable in practice — local geometry + speech can't fail.
+        // Keep it quiet and visible instead of ever saying "couldn't build".
+        console.error("build failed", err);
+        setBuilding(null);
+        toast.error("Something went wrong showing that model.");
+        resumeAfterAction();
+      });
+      return true;
     },
     [pauseMic, resumeAfterAction, setAgentState, speak]
   );

@@ -9,6 +9,7 @@
  * reflected the moment the user speaks or types again.
  */
 import type { HoloModel, HoloPartType, HoloSpec } from "./types";
+import { mentionsBench } from "./workbench";
 
 /* ------------------------------ colors ------------------------------ */
 
@@ -173,7 +174,8 @@ function positionWord(pos: { x: number; y: number }): string {
 const HEADER =
   "[Workbench vision — a live snapshot of the user's holographic workbench, refreshed before every message. " +
   "It is your eyes on the bench: answer questions about these models from this data, describe them naturally, " +
-  "compare them when asked, and never quote numbers, part lists, or the snapshot itself back to the user.]";
+  "compare them when asked, and never quote numbers, part lists, or the snapshot itself back to the user. " +
+  "The user may call the workbench the workshop, studio, lab, or workspace — same thing.]";
 
 /**
  * The system-message content that gives the conversational LLM live vision
@@ -264,7 +266,7 @@ export function matchBenchQuestion(input: string): boolean {
     .replace(/[^a-z\s]/g, "")
     .replace(/\s+/g, " ");
   if (!t) return false;
-  if (/\b(what|whats|which|how)\b/.test(t) && /\b(workbench|bench)\b/.test(t)) return true;
+  if (/\b(what|whats|which|how)\b/.test(t) && mentionsBench(t)) return true;
   if (/\bhow many\b/.test(t) && /\b(models?|holograms?|things?|objects?|items?)\b/.test(t)) return true;
   if (/\bwhat\b/.test(t) && /\bdid you\b/.test(t) && /\b(build|make|create|design|construct)\b/.test(t)) {
     return true;

@@ -13,6 +13,23 @@ const CLOSE_RE = /\b(close|exit|leave|stop|end|disable|hide|quit|turn off)\b/;
  *  which has live vision of the bench. Never let it trigger a command. */
 const QUESTION_RE = /\b(what|whats|which|why|who|whose|where|how|describe|explain|tell)\b/;
 
+/** Everything the user might call the workbench — all treated as one
+ *  concept, so "open the workshop" / "clear the studio" / "what's on the
+ *  lab" work exactly like the same sentence with "workbench". */
+const BENCH_WORDS = "workbench|workshop|bench|studio|workspace|lab";
+const BENCH_SYNONYM_RE = new RegExp(`\\b(${BENCH_WORDS})\\b`, "g");
+const BENCH_TEST_RE = new RegExp(`\\b(${BENCH_WORDS})\\b`);
+
+/** True when the (normalized) utterance mentions the bench by any name. */
+export function mentionsBench(normalized: string): boolean {
+  return BENCH_TEST_RE.test(normalized);
+}
+
+/** Command matching maps every bench synonym to "workbench". */
+function benchify(normalized: string): string {
+  return normalized.replace(BENCH_SYNONYM_RE, "workbench");
+}
+
 /** Normalized lowercase word stream for the matchers below. */
 function normalizeUtterance(input: string): string {
   return input
@@ -28,16 +45,22 @@ function normalizeUtterance(input: string): string {
  * Only short utterances count, so everyday mentions of the word don't.
  */
 export function matchWorkbenchCommand(input: string): WorkbenchAction | null {
-  const t = input
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z\s]/g, "")
-    .replace(/\s+/g, " ");
-  if (QUESTION_RE.test(t)) return null; // "show me what's on the workbench" → chat
+  const t = benchify(
+    input
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z\s]/g, "")
+      .replace(/\s+/g, " ")
+  );
+  if (QUESTION_RE.test(t)) return null; // "show me what's on the workshop" → chat
   if (!t.includes("workbench")) return null;
 
   const words = t.split(" ").filter(Boolean);
   if (words.length > 6) return null;
+
+  // "clear/delete the workbench" is a DELETE command, not an open/close —
+  // return null so matchDeleteCommand handles it (tryWorkbench runs first).
+  if (/\b(delete|remove|destroy|clear|wipe|empty|reset)\b/.test(t)) return null;
 
   if (CLOSE_RE.test(t)) return "close";
   if (OPEN_RE.test(t)) return "open";
@@ -139,7 +162,7 @@ export type DeleteCommand = { all: true } | { name: string };
  * "clear the workbench" / "delete all models" → actionable command.
  */
 export function matchDeleteCommand(input: string, modelNames: string[]): DeleteCommand | null {
-  const t = normalizeUtterance(input);
+  const t = benchify(normalizeUtterance(input));
   if (!t) return null;
   if (QUESTION_RE.test(t)) return null; // "why did you delete my chair?" → chat
 

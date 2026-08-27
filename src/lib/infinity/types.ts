@@ -95,6 +95,9 @@ export interface HoloModel {
   scale?: number;
   /** Timestamp of creation — fresh models assemble part-by-part on screen. */
   bornAt?: number;
+  /** True while an AI design is still streaming in (progressive build —
+   * not persisted, so a reload never resurrects a half-designed model). */
+  pending?: boolean;
 }
 
 /** Resize handle limits (fraction of the model's natural size). */

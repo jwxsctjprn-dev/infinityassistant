@@ -10,11 +10,11 @@ import {
   matchWorkbenchCommand,
   type WorkbenchAction,
 } from "@/lib/infinity/workbench";
-import { MAX_MODELS, nextSlot, SPAWN_SETTLE_MS } from "@/lib/infinity/holo";
+import { MAX_MODELS, nextSlot, normalizeHoloSpec, SPAWN_SETTLE_MS } from "@/lib/infinity/holo";
 import { ASSEMBLE_MS, matchLibraryModel } from "@/lib/infinity/holo-library";
 import { generateModel, matchFamilyModel, matchPhraseModel } from "@/lib/infinity/holo-generator";
 import { cacheGetSpec, cachePutSpec, designHoloSpec } from "@/lib/infinity/holo-ai";
-import type { HoloSpec } from "@/lib/infinity/types";
+import type { HoloPart, HoloSpec } from "@/lib/infinity/types";
 import type { BuildingState } from "@/components/infinity/workbench-models";
 
 /**
@@ -590,6 +590,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         if (!spec) spec = cacheGetSpec(cmd.object);
 
         let designed = false;
+        let salvagedDesign = false;
         let designFailed = false;
         const willDesign = !spec && keyReady;
 
@@ -601,8 +602,29 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
 
         // 3) AI design — the user's LLM invents the object from scratch.
         //    Only reached for objects the local builders don't recognize
-        //    (or when explicitly forced with "design a …").
+        //    (or when explicitly forced with "design a …"). The model card
+        //    spawns IMMEDIATELY and fills in part-by-part as the design
+        //    streams — you watch the object being invented, live.
+        let liveId: string | null = null;
         if (willDesign) {
+          const startName = cmd.object
+            .split(/\s+/)
+            .slice(0, 3)
+            .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+            .join(" ");
+          const spawnStore = useInfinity.getState();
+          const cardId = `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+          liveId = cardId;
+          spawnStore.addModel({
+            id: cardId,
+            name: startName,
+            spec: { name: startName, parts: [] },
+            pos: nextSlot(spawnStore.models.length),
+            rot: { x: 0.12, y: -0.55 },
+            bornAt: Date.now(),
+            pending: true,
+          });
+
           setBuilding({
             name: cmd.object,
             phase: "building",
@@ -611,10 +633,10 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
             count: null,
             note: "DESIGNING",
           });
-          // Gentle crawl while the model thinks (caps at 42%).
+          // Gentle crawl while the model thinks (caps at 30%).
           const crawl = window.setInterval(() => {
             setBuilding((b) =>
-              b && b.note ? { ...b, progress: Math.min(0.42, b.progress + 0.005) } : b
+              b && b.note ? { ...b, progress: Math.min(0.3, b.progress + 0.005) } : b
             );
           }, 500);
           try {
@@ -634,10 +656,27 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
                       }
                     : b
                 ),
+              onPart: (_part, soFar) => {
+                // Progressive assembly: every parsed line becomes a visible
+                // part immediately (re-normalized so the hologram stays
+                // centered and sized while it grows).
+                const partial = normalizeHoloSpec(startName, soFar);
+                useInfinity.getState().updateModel(cardId, { spec: partial });
+                setBuilding((b) =>
+                  b
+                    ? {
+                        ...b,
+                        note: `${soFar.length} PARTS`,
+                        progress: Math.min(0.82, 0.1 + soFar.length * 0.06),
+                      }
+                    : b
+                );
+              },
             });
             if (out?.spec) {
               spec = out.spec;
               designed = true;
+              salvagedDesign = out.salvaged;
               if (!out.salvaged) cachePutSpec(cmd.object, out.spec);
             }
           } catch {
@@ -646,6 +685,8 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
             window.clearInterval(crawl);
           }
           if (!spec) designFailed = true;
+          // A salvaged partial design stays on screen (already visible);
+          // on hard failure the card is repurposed by the fallback below.
         }
 
         // 4) Abstract archetypes guarantee a model — no key, no network,
@@ -655,25 +696,38 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         }
 
         const finalSpec = spec;
-        const from = designed ? 0.45 : 0.08;
+        const progressive = liveId !== null;
+        const from = designed ? 0.82 : 0.08;
 
         setBuilding({
           name: finalSpec.name,
           phase: "building",
           progress: from,
-          partsDone: 0,
+          partsDone: progressive ? finalSpec.parts.length : 0,
           count: finalSpec.parts.length,
         });
 
-        const store = useInfinity.getState();
-        store.addModel({
-          id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          name: finalSpec.name,
-          spec: finalSpec,
-          pos: nextSlot(store.models.length),
-          rot: { x: 0.12, y: -0.55 },
-          bornAt: Date.now(),
-        });
+        if (progressive && liveId) {
+          // The live card adopts the final spec (exact name + geometry).
+          // Salvaged partials (stream died mid-design) stay session-only:
+          // never persisted, never cached — a reload must not resurrect a
+          // half-designed hologram. Complete designs persist normally.
+          useInfinity.getState().updateModel(liveId, {
+            spec: finalSpec,
+            name: finalSpec.name,
+            pending: salvagedDesign || undefined,
+          });
+        } else if (!progressive) {
+          const store = useInfinity.getState();
+          store.addModel({
+            id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            name: finalSpec.name,
+            spec: finalSpec,
+            pos: nextSlot(store.models.length),
+            rot: { x: 0.12, y: -0.55 },
+            bornAt: Date.now(),
+          });
+        }
 
         // Progress tracks the actual on-screen part-by-part assembly.
         const t0 = performance.now();
@@ -689,7 +743,9 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
               ? {
                   ...b,
                   progress: from + (1 - from) * frac,
-                  partsDone: Math.round(frac * finalSpec.parts.length),
+                  partsDone: progressive
+                    ? finalSpec.parts.length
+                    : Math.round(frac * finalSpec.parts.length),
                 }
               : b
           );

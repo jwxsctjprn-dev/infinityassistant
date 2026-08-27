@@ -32,11 +32,13 @@ Types and what "size" means for each:
 x y z is the part CENTER position. rx ry rz is rotation in radians (usually 0 0 0). Colors are hex like #8b5a2b.
 
 Rules:
-- Use 8 to 16 parts TOTAL — never more than 16, no matter how complex the object. Count your lines before answering. Prefer fewer, larger parts over many tiny ones (railings, windows, teeth: suggest them with 1-2 parts, not many).
-- Capture the object's real shape, proportions, and true-to-life colors.
-- Capture the 3D SILHOUETTE: vary part sizes and positions to trace the object's outline (animals have bodies and limbs, vehicles have wheels). Tall objects taper GRADUALLY — the top stays at least a quarter of the base width; use a cone for pointed tips instead of shrinking boxes to nothing. No dimension below 0.05.
+- Use 8 to 14 parts TOTAL — never more than 14, no matter how complex the object. Count your lines before answering.
+- GROUND CONTACT: anything that supports the object (legs, wheels, feet, base) must touch the ground. A part centered at y with height h spans y−h/2 to y+h/2 — so a leg of height 1 centered at y=0.5 spans 0 to 1. COMPUTE every y so stacked parts actually TOUCH, never float and never sink.
+- PROPORTIONS: match the real object (a guitar is about 4× longer than wide; a giraffe's neck is roughly half its height; a table top is wider than it is tall). Get width:height:depth right FIRST, then place parts.
+- SILHOUETTE: spend every part on the big shape — body, limbs, head, wheels, roof. NEVER waste parts on tiny details (eyes, frets, keys, buttons, stripes, text). Tall objects taper GRADUALLY — the top stays at least a quarter of the base width; use a cone for pointed tips instead of shrinking boxes to nothing. No dimension below 0.05.
 - Most parts should be between 0.2 and 2 units in size.
-- Parts must connect with no floating gaps; symmetric parts go in symmetric positions.
+- Symmetric parts go in symmetric positions (left/right legs at ±x, four wheels at ±x ±z).
+- True-to-life colors; parts that touch can share colors.
 - Order the parts bottom-to-top so the model assembles nicely.
 
 Example — a wooden chair:
@@ -63,7 +65,29 @@ cylinder | 0 0.3 0 | 0.24 0.6 | 0 0 0 | #6b4423
 cone | 0 0.95 0 | 1.1 0.9 | 0 0 0 | #2e7d46
 cone | 0 1.45 0 | 0.85 0.8 | 0 0 0 | #2e7d46
 cone | 0 1.9 0 | 0.6 0.7 | 0 0 0 | #35a05a
-cone | 0 2.3 0 | 0.38 0.6 | 0 0 0 | #35a05a`;
+cone | 0 2.3 0 | 0.38 0.6 | 0 0 0 | #35a05a
+
+Example — a horse (four legs on the ground; body sits ON the legs; neck tilts forward):
+NAME = Horse
+cylinder | -0.32 0.53 0.6 | 0.2 1.06 | 0 0 0 | #7a4a2b
+cylinder | 0.32 0.53 0.6 | 0.2 1.06 | 0 0 0 | #7a4a2b
+cylinder | -0.32 0.53 -0.6 | 0.2 1.06 | 0 0 0 | #7a4a2b
+cylinder | 0.32 0.53 -0.6 | 0.2 1.06 | 0 0 0 | #7a4a2b
+box | 0 1.36 0 | 0.85 0.7 1.7 | 0 0 0 | #8a5a33
+box | 0 1.9 -0.72 | 0.34 0.95 0.4 | -0.42 0 0 | #8a5a33
+box | 0 2.42 -1.06 | 0.3 0.32 0.62 | -0.42 0 0 | #6f4526
+box | 0 2.06 -0.66 | 0.12 1.0 0.5 | -0.42 0 0 | #3d2417
+capsule | 0 1.28 0.95 | 0.14 0.7 | 0.5 0 0 | #3d2417
+
+Example — a car (wheels rotated upright, touching the ground; cabin on the chassis):
+NAME = Car
+cylinder | -0.62 0.33 0.72 | 0.24 0.66 | 0 0 1.57 | #1c1c1c
+cylinder | 0.62 0.33 0.72 | 0.24 0.66 | 0 0 1.57 | #1c1c1c
+cylinder | -0.62 0.33 -0.72 | 0.24 0.66 | 0 0 1.57 | #1c1c1c
+cylinder | 0.62 0.33 -0.72 | 0.24 0.66 | 0 0 1.57 | #1c1c1c
+box | 0 0.78 0 | 1.28 0.42 2.3 | 0 0 0 | #b02a30
+box | 0 1.16 0.15 | 1.12 0.44 1.2 | 0 0 0 | #b02a30
+box | 0 1.14 -0.47 | 1.04 0.36 0.08 | 0 0 0 | #9fd8ef`;
 
 /* ------------------------------------------------------------------ */
 /* Parsing                                                              */
@@ -123,7 +147,7 @@ export function isPartLine(line: string): boolean {
 }
 
 /** Parse a complete line into a part, or null if it isn't one. */
-function parsePartLine(line: string): HoloPart | null {
+export function parseDesignLine(line: string): HoloPart | null {
   const seg = line.split("|");
   if (seg.length < 3) return null;
   const type = seg[0].trim().toLowerCase() as HoloPartType;
@@ -186,6 +210,7 @@ export function parseDesignText(text: string): ParsedDesign | null {
 
   let name = "";
   const parts: HoloPart[] = [];
+  const seen = new Set<string>();
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) continue;
@@ -195,9 +220,20 @@ export function parseDesignText(text: string): ParsedDesign | null {
       continue;
     }
     if (line.startsWith("#") || line.startsWith("//")) continue;
-    const part = parsePartLine(line);
-    if (part) parts.push(part);
-    if (parts.length >= 24) break;
+    const part = parseDesignLine(line);
+    if (part) {
+      // LLMs occasionally repeat an identical line (z-fighting + wasted
+      // parts) — keep only the first copy.
+      const key =
+        `${part.type}|${part.position.map((v) => v.toFixed(2)).join(",")}` +
+        `|${part.scale.map((v) => v.toFixed(2)).join(",")}` +
+        `|${part.rotation.map((v) => v.toFixed(2)).join(",")}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        parts.push(part);
+      }
+    }
+    if (parts.length >= 16) break;
   }
 
   if (parts.length < 3) return null;
@@ -205,6 +241,12 @@ export function parseDesignText(text: string): ParsedDesign | null {
     name: name || "Hologram",
     parts,
   };
+}
+
+/** Extract the display name from streamed design text ("NAME = X" lines). */
+export function designNameFromText(text: string, fallback: string): string {
+  const m = /^name\s*[:=]\s*(.+)$/im.exec(text.trim());
+  return m ? m[1].trim().slice(0, 40) : fallback;
 }
 
 /** Turn parsed design text into a normalized, render-ready spec.
@@ -317,11 +359,36 @@ export interface DesignProgress {
   progress: number;
 }
 
+/** Hard ceiling on a live design — after this the client aborts and either
+ * salvages the parts that arrived or falls back to the local builders. The
+ * user should never watch a spinner for a minute. */
+export const DESIGN_DEADLINE_MS = 35_000;
+
+/** Combine the caller's signal with an overall deadline. */
+function withDeadline(signal: AbortSignal | undefined, ms: number): AbortController {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  const abort = () => {
+    clearTimeout(timer);
+    ctl.abort();
+  };
+  if (signal) {
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  }
+  ctl.signal.addEventListener("abort", () => {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  }, { once: true });
+  return ctl;
+}
+
 /**
  * Ask the configured provider to DESIGN the object via /api/model.
- * Streams NDJSON; every complete part line updates progress; if the
- * connection dies mid-stream, whatever lines already arrived are
- * salvaged into a spec instead of failing.
+ * Streams NDJSON; every complete part line updates progress (and, via
+ * onPart, can be rendered live — progressive assembly); if the connection
+ * dies mid-stream, whatever lines already arrived are salvaged into a
+ * spec instead of failing.
  */
 export async function designHoloSpec(opts: {
   object: string;
@@ -330,14 +397,17 @@ export async function designHoloSpec(opts: {
   baseUrl?: string;
   model: string;
   onProgress?: (p: DesignProgress) => void;
+  /** Fired for every complete part line as it arrives (live assembly). */
+  onPart?: (part: HoloPart, soFar: HoloPart[]) => void;
   signal?: AbortSignal;
 }): Promise<{ spec: HoloSpec; salvaged: boolean } | null> {
-  const { object, provider, apiKey, baseUrl, model, onProgress, signal } = opts;
+  const { object, provider, apiKey, baseUrl, model, onProgress, onPart, signal } = opts;
 
+  const deadline = withDeadline(signal, DESIGN_DEADLINE_MS);
   const res = await fetch("/api/model", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    signal,
+    signal: deadline.signal,
     body: JSON.stringify({
       provider,
       apiKey: apiKey.trim(),
@@ -345,6 +415,11 @@ export async function designHoloSpec(opts: {
       model: model.trim(),
       object: object.trim().slice(0, 120),
     }),
+  }).catch((err: unknown) => {
+    if (deadline.signal.aborted) {
+      throw new Error("The design took too long — try again.");
+    }
+    throw err;
   });
 
   if (!res.ok || !res.body) {
@@ -361,9 +436,23 @@ export async function designHoloSpec(opts: {
 
   let full = "";
   let partsDesigned = 0;
+  const liveParts: HoloPart[] = [];
+  const seenLive = new Set<string>();
   const scan = createDesignScanner((line) => {
     if (isPartLine(line)) {
       partsDesigned++;
+      const part = parseDesignLine(line);
+      if (part) {
+        const key =
+          `${part.type}|${part.position.map((v) => v.toFixed(2)).join(",")}` +
+          `|${part.scale.map((v) => v.toFixed(2)).join(",")}` +
+          `|${part.rotation.map((v) => v.toFixed(2)).join(",")}`;
+        if (!seenLive.has(key)) {
+          seenLive.add(key);
+          liveParts.push(part);
+          onPart?.(part, liveParts);
+        }
+      }
       onProgress?.({
         phase: "designing",
         partsDesigned,
@@ -407,7 +496,8 @@ export async function designHoloSpec(opts: {
       }
     }
   } catch {
-    // Connection dropped mid-stream — salvage what arrived below.
+    // Connection dropped (or the deadline fired) mid-stream — salvage
+    // whatever arrived below.
     streamError = streamError ?? "The connection was interrupted.";
   }
 

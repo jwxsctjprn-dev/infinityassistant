@@ -148,7 +148,11 @@ function SpecGroup({
   frameRef?: RefObject<HTMLDivElement | null>;
 }) {
   const group = useRef<THREE.Group>(null);
-  const [visible, setVisible] = useState(assembleMs ? 1 : spec.parts.length);
+  // Timed assembly (fresh local builds) reveals parts one-by-one via state;
+  // progressive AI builds GROW the spec live — their visible count is
+  // derived directly (reveal starts at ∞ → everything present shows).
+  const [reveal, setReveal] = useState(assembleMs ? 1 : Infinity);
+  const visible = Math.min(reveal, spec.parts.length);
 
   // All part corners (model space) — projecting these each frame yields the
   // TIGHT silhouette bounds of the hologram, so the overlay frame hugs it.
@@ -162,7 +166,7 @@ function SpecGroup({
     if (!assembleMs) return;
     const per = Math.max(40, assembleMs / spec.parts.length);
     const iv = setInterval(() => {
-      setVisible((v) => {
+      setReveal((v) => {
         if (v >= spec.parts.length) {
           clearInterval(iv);
           return v;

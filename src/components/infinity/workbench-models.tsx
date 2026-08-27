@@ -316,7 +316,11 @@ function ModelCard({ model }: { model: HoloModel }) {
             rot={model.rot}
             scale={scale}
             assembleMs={
-              model.bornAt && Date.now() - model.bornAt < ASSEMBLE_MS + 800
+              // Fresh local builds assemble part-by-part. Pending AI builds
+              // assemble LIVE as the design streams in (no timer).
+              !model.pending &&
+              model.bornAt &&
+              Date.now() - model.bornAt < ASSEMBLE_MS + 800
                 ? ASSEMBLE_MS
                 : undefined
             }

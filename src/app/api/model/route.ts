@@ -12,11 +12,13 @@
  *   {"t":"done","finish":"stop"}      — provider finished ("stop"|"length"|…)
  *   {"t":"error","v":"message"}       — any failure before/while streaming
  *
- * Resilience (GLM-4.6 & friends can reason for minutes before output):
+ * Resilience:
  *   - keepalive pings every 5s so no gateway can idle-kill the connection
- *   - 150s budget for the provider's FIRST byte (thinking/queue time)
- *   - 35s idle watchdog DURING the stream (reset by every provider chunk)
- *   - generous max_tokens so reasoning never starves the design itself
+ *   - 45s budget for the provider's FIRST byte (queue/slow-start time —
+ *     thinking is disabled for GLM reasoning models, so this is generous)
+ *   - 25s idle watchdog DURING the stream (reset by every provider chunk)
+ *   - 120s absolute cap (the client aborts at 35s anyway — this is the
+ *     backstop for abandoned tabs)
  *   - up to 3 attempts on transient failures (network, 429/5xx, empty
  *     streams) — only retried while nothing has been forwarded
  *   - every attempt + outcome is logged server-side ([model] … in dev.log)
@@ -75,6 +77,32 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const log = (msg: string) => {
   console.log(`[model] ${msg}`);
 };
+
+/** GLM models that reason by default (10-60s of hidden thinking before a
+ * single output token). Designing a part list is a formatting task — the
+ * thinking adds latency without adding quality, so it is switched off.
+ * Older/non-reasoning models never receive the parameter (their APIs may
+ * reject unknown fields). */
+const THINKING_BY_DEFAULT = /^glm-4\.[56]/i;
+
+function designRequestBody(model: string, object: string): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    model,
+    messages: [
+      { role: "system", content: DESIGN_SYSTEM },
+      { role: "user", content: `Design a model of: ${object}` },
+    ],
+    temperature: 0.6,
+    // A 14-part design is ~600 tokens; 3000 is generous headroom and keeps
+    // a pathological loop from streaming for minutes.
+    max_tokens: 3000,
+    stream: true,
+  };
+  if (THINKING_BY_DEFAULT.test(model.trim())) {
+    body.thinking = { type: "disabled" };
+  }
+  return body;
+}
 
 export async function POST(req: NextRequest): Promise<Response> {
   // --- Parse body -----------------------------------------------------------
@@ -192,7 +220,7 @@ export async function POST(req: NextRequest): Promise<Response> {
         if (idleTimer) clearTimeout(idleTimer);
         idleTimer = setTimeout(
           () => fail(`${info.label} stopped sending data mid-design. Try again.`),
-          35_000
+          25_000
         );
       };
 
@@ -213,7 +241,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       // Whisper every 5s so no proxy/gateway can idle-timeout this response
       // while the provider thinks, queues, or retries.
       keepAlive = setInterval(() => send({ t: "ping" }), 5_000);
-      hardTimer = setTimeout(() => fail("The design took too long and was cancelled."), 480_000);
+      hardTimer = setTimeout(() => fail("The design took too long and was cancelled."), 120_000);
 
       const RETRYABLE = new Set([429, 500, 502, 503, 504]);
       const MAX_ATTEMPTS = 3;
@@ -236,20 +264,10 @@ export async function POST(req: NextRequest): Promise<Response> {
             providerRes = await fetch(`${baseUrl}/chat/completions`, {
               method: "POST",
               headers,
-              body: JSON.stringify({
-                model,
-                messages: [
-                  { role: "system", content: DESIGN_SYSTEM },
-                  { role: "user", content: `Design a model of: ${object}` },
-                ],
-                temperature: 0.7,
-                // Generous: reasoning models can burn thousands of tokens on
-                // thinking before the design — the cap must never starve output.
-                max_tokens: 8000,
-                stream: true,
-              }),
-              // 150s for the provider's first byte — covers long thinking.
-              signal: timeoutOrAbort(req.signal, 150_000),
+              body: JSON.stringify(designRequestBody(model, object)),
+              // 45s for the provider's first byte — thinking is off for GLM
+              // reasoning models, so this only covers queueing and slow starts.
+              signal: timeoutOrAbort(req.signal, 45_000),
             });
           } catch (err) {
             if (req.signal.aborted) {
@@ -257,7 +275,7 @@ export async function POST(req: NextRequest): Promise<Response> {
               return;
             }
             if (err instanceof DOMException && err.name === "AbortError") {
-              log(`attempt ${attempt}: no first byte within 150s`);
+              log(`attempt ${attempt}: no first byte within 45s`);
               if (attempt < MAX_ATTEMPTS) continue;
               fail(`${info.label} took too long to start responding. Try again.`);
               return;

@@ -30,7 +30,7 @@ interface InfinityStore {
   clearModels: () => void;
   updateModel: (
     id: string,
-    patch: Partial<Pick<HoloModel, "pos" | "rot" | "scale">>
+    patch: Partial<Pick<HoloModel, "pos" | "rot" | "scale" | "spec" | "name" | "pending">>
   ) => void;
 }
 
@@ -56,7 +56,12 @@ export const useInfinity = create<InfinityStore>()(
     {
       name: "infinity-settings",
       version: 2,
-      partialize: (state) => ({ settings: state.settings, models: state.models }),
+      partialize: (state) => ({
+        settings: state.settings,
+        // Models mid-design (progressive AI build) are session-only — a
+        // reload must never resurrect a half-designed hologram.
+        models: state.models.filter((m) => !m.pending),
+      }),
       migrate: (state) => {
         const s = state as { settings?: Settings; models?: HoloModel[] };
         return { settings: s.settings ?? DEFAULT_SETTINGS, models: s.models ?? [] };

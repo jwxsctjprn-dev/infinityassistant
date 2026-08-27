@@ -84,6 +84,13 @@ function rms(analyser: AnalyserNode, data: Uint8Array<ArrayBuffer>): number {
 
 export type AgentMode = "voice" | "text";
 
+/** One line of the visible conversation log (typing mode). */
+export interface TranscriptEntry {
+  id: number;
+  role: "user" | "infinity";
+  text: string;
+}
+
 interface VoiceSession {
   stopped: boolean;
   micStream: MediaStream | null;
@@ -107,6 +114,8 @@ export interface UseInfinityAgent {
   lastReply: string;
   error: string | null;
   micBlocked: boolean;
+  /** Visible conversation log (typing mode shows it as chat bubbles). */
+  transcript: TranscriptEntry[];
   /** Live workbench build progress (null when idle). */
   building: BuildingState | null;
   /** 0..1 smoothed audio loudness for the orb (read imperatively each frame) */
@@ -127,6 +136,8 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
   const [error, setError] = useState<string | null>(null);
   const [micBlocked, setMicBlocked] = useState(false);
   const [building, setBuilding] = useState<BuildingState | null>(null);
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
+  const transcriptIdRef = useRef(0);
 
   const levelRef = useRef(0);
   const stateRef = useRef<AgentState>("idle");
@@ -203,6 +214,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
     setMode(null);
     setAgentState("idle");
     setInterim("");
+    setTranscript([]);
     historyRef.current = [];
   }, [setAgentState, teardownVoice]);
 
@@ -401,6 +413,41 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
     [setAgentState]
   );
 
+  /* ------------------- respond / transcript ------------------------ */
+
+  /** Append a line to the visible conversation log. */
+  const pushTranscript = useCallback((role: "user" | "infinity", text: string) => {
+    const id = ++transcriptIdRef.current;
+    setTranscript((prev) => {
+      const next = [...prev, { id, role, text }];
+      return next.length > 40 ? next.slice(-40) : next;
+    });
+  }, []);
+
+  /** Infinity's side of the conversation: SPOKEN in voice mode, shown as
+   *  silent text in typing mode — a typed session never plays any sound. */
+  const respond = useCallback(
+    async (text: string): Promise<void> => {
+      if (modeRef.current === "voice") {
+        await speak(text);
+        return;
+      }
+      setLastReply(text);
+      pushTranscript("infinity", text);
+    },
+    [pushTranscript, speak]
+  );
+
+  /** The user's side: caption line + transcript entry (both modes log; only
+   *  typing mode displays the transcript). */
+  const noteUser = useCallback(
+    (text: string) => {
+      setLastUser(text);
+      pushTranscript("user", text);
+    },
+    [pushTranscript]
+  );
+
   /* -------------------------- workbench ----------------------------- */
 
   /** Execute a workbench command: toggle the grid, confirm out loud,
@@ -428,7 +475,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         const confirmText = opening ? "Workbench online." : "Workbench closed.";
         setLastReply(confirmText);
         try {
-          await speak(confirmText);
+          await respond(confirmText);
         } catch {
           /* confirmation is best-effort */
         }
@@ -447,7 +494,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         }
       }
     },
-    [setAgentState, speak]
+    [respond, setAgentState]
   );
 
   /** Returns true when the text was a workbench command (already handled). */
@@ -456,12 +503,12 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       const action = matchWorkbenchCommand(raw);
       if (!action) return false;
       setInterim("");
-      setLastUser(raw.trim());
+      noteUser(raw.trim());
       setError(null);
       void applyWorkbench(action);
       return true;
     },
-    [applyWorkbench]
+    [applyWorkbench, noteUser]
   );
 
   /** Pause mic + clear buffers so Infinity never hears its own voice. */
@@ -511,7 +558,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       if (!cmd) return false;
 
       setInterim("");
-      setLastUser(raw.trim());
+      noteUser(raw.trim());
       setError(null);
 
       const models = useInfinity.getState().models;
@@ -546,7 +593,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         let designFailed = false;
         const willDesign = !spec && keyReady;
 
-        const spoken = speak(willDesign ? "OK, designing that now." : "OK, building that now.").catch(
+        const spoken = respond(willDesign ? "OK, designing that now." : "OK, building that now.").catch(
           () => {
             /* best effort */
           }
@@ -662,7 +709,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         await sleep(650);
         setBuilding(null);
         try {
-          await speak(`${finalSpec.name} ready.`);
+          await respond(`${finalSpec.name} ready.`);
         } catch {
           /* best effort */
         }
@@ -682,7 +729,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       });
       return true;
     },
-    [pauseMic, resumeAfterAction, setAgentState, speak]
+    [noteUser, pauseMic, respond, resumeAfterAction, setAgentState]
   );
 
   /** Intercept "delete the X" / "clear the workbench" while in workbench. */
@@ -697,7 +744,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       if (!cmd) return false;
 
       setInterim("");
-      setLastUser(raw.trim());
+      noteUser(raw.trim());
       setError(null);
       pauseMic();
 
@@ -706,7 +753,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         store.clearModels();
         void (async () => {
           try {
-            await speak(
+            await respond(
               names.length === 1
                 ? `Removed the ${names[0]}.`
                 : `Cleared ${names.length} models from the workbench.`
@@ -726,7 +773,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       store.removeModel(target.id);
       void (async () => {
         try {
-          await speak(`Removed the ${target.name}.`);
+          await respond(`Removed the ${target.name}.`);
         } catch {
           /* best effort */
         }
@@ -734,7 +781,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       })();
       return true;
     },
-    [pauseMic, resumeAfterAction, speak]
+    [noteUser, pauseMic, respond, resumeAfterAction]
   );
 
   /* ---------------------------- one turn ---------------------------- */
@@ -746,7 +793,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       if (tryDelete(userText)) return;
       if (tryBuild(userText)) return;
       setError(null);
-      setLastUser(userText);
+      noteUser(userText);
       setInterim("");
       setAgentState("thinking");
 
@@ -784,7 +831,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       setLastReply(reply);
 
       try {
-        await speak(reply);
+        await respond(reply);
       } catch (err) {
         if (!activeRef.current || abortRef.current?.signal.aborted) return;
         const msg = err instanceof Error && err.message ? err.message : "Voice playback failed.";
@@ -808,7 +855,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         setAgentState("idle");
       }
     },
-    [askChat, setAgentState, speak, tryBuild, tryDelete, tryWorkbench]
+    [askChat, noteUser, respond, setAgentState, tryBuild, tryDelete, tryWorkbench]
   );
 
   /* --------------------- recognition wiring ------------------------- */
@@ -990,6 +1037,22 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
     (text: string) => {
       const t = text.trim();
       if (!t) return;
+      // TYPING MODE: sending text always implies a silent text session —
+      // no mic, no sound, replies appear as text. If a VOICE session is
+      // already running, the typed text joins it instead (barge-in, spoken).
+      if (!activeRef.current) {
+        activeRef.current = true;
+        modeRef.current = "text";
+        setMode("text");
+        setSessionActive(true);
+        setMicBlocked(false);
+        setError(null);
+        setLastUser("");
+        setLastReply("");
+        setTranscript([]);
+        historyRef.current = [];
+        setAgentState("idle");
+      }
       // Workbench commands are local — they work even without an API key.
       if (tryWorkbench(t)) return;
       if (tryDelete(t)) return;
@@ -1001,18 +1064,6 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         });
         onNeedSettingsRef.current();
         return;
-      }
-      if (!activeRef.current) {
-        activeRef.current = true;
-        modeRef.current = "text";
-        setMode("text");
-        setSessionActive(true);
-        setMicBlocked(false);
-        setError(null);
-        setLastUser("");
-        setLastReply("");
-        historyRef.current = [];
-        setAgentState("idle");
       }
       void runTurn(t);
     },
@@ -1061,6 +1112,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
     lastReply,
     error,
     micBlocked,
+    transcript,
     building,
     levelRef,
     start,

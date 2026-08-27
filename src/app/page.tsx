@@ -21,9 +21,9 @@ const STATE_LABEL: Record<string, string> = {
 export default function Home() {
   const [mounted, setMounted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [inputVisible, setInputVisible] = useState(false);
   const [inputValue, setInputValue] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const transcriptRef = useRef<HTMLDivElement | null>(null);
   const captions = useInfinity((s) => s.settings.captions);
   const workbench = useInfinity((s) => s.workbench);
   const setWorkbench = useInfinity((s) => s.setWorkbench);
@@ -54,28 +54,17 @@ export default function Home() {
   const [gridVisible, setGridVisible] = useState(false);
   useEffect(() => {
     if (workbench) {
-      setInputVisible(false);
       const t = setTimeout(() => setGridVisible(true), 1000);
       return () => clearTimeout(t);
     }
     setGridVisible(false);
   }, [workbench]);
 
-  // Text sessions keep the input visible; voice listening hides it
+  // Keep the newest transcript message in view (typing mode).
   useEffect(() => {
-    if (workbench) return; // workbench controls its own visibility
-    if (!agent.sessionActive) {
-      setInputVisible(false);
-    } else if (agent.mode === "text") {
-      setInputVisible(true);
-    } else if (agent.mode === "voice" && agent.state === "listening") {
-      setInputVisible(false);
-    }
-  }, [agent.mode, agent.sessionActive, agent.state, workbench]);
-
-  useEffect(() => {
-    if (inputVisible) inputRef.current?.focus();
-  }, [inputVisible]);
+    const el = transcriptRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [agent.transcript]);
 
   const handleToggle = useCallback(() => {
     agent.toggle();
@@ -86,13 +75,15 @@ export default function Home() {
       e.preventDefault();
       const v = inputValue.trim();
       if (!v) return;
+      // A turn is already in flight — keep the text so it isn't lost.
+      if (agent.state === "thinking" || agent.state === "speaking") return;
       setInputValue("");
       agent.sendText(v);
     },
     [agent, inputValue]
   );
 
-  // Keyboard: ⌘, settings · / type · Space toggles voice · Esc stops/hides
+  // Keyboard: ⌘, settings · / focus typing · Space toggles voice · Esc stops
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const active = document.activeElement;
@@ -103,9 +94,9 @@ export default function Home() {
         return;
       }
       if (e.key === "Escape") {
+        // The typing bar is universal — Esc never hides it, only blurs.
         if (inInput) {
           inputRef.current?.blur();
-          if (agent.mode !== "text") setInputVisible(false);
           return;
         }
         if (workbench) {
@@ -116,7 +107,6 @@ export default function Home() {
           agent.stop();
           return;
         }
-        setInputVisible(false);
         return;
       }
       if (
@@ -126,14 +116,13 @@ export default function Home() {
         !document.querySelector('[role="dialog"]')
       ) {
         e.preventDefault();
-        setInputVisible(true);
+        inputRef.current?.focus();
         return;
       }
       if (
         e.code === "Space" &&
         !e.repeat &&
         !inInput &&
-        !inputVisible &&
         !settingsOpen &&
         !document.querySelector('[role="dialog"]')
       ) {
@@ -151,15 +140,18 @@ export default function Home() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [agent, handleToggle, inputVisible, setWorkbench, settingsOpen, workbench]);
+  }, [agent, handleToggle, setWorkbench, settingsOpen, workbench]);
 
   const configured = mounted ? isConfigured(useInfinity.getState().settings) : false;
   const stateLabel = STATE_LABEL[agent.state];
 
+  // Typing mode = silent text session (no mic, no sound)
+  const textMode = agent.mode === "text" && agent.sessionActive;
+
   let hint = "";
-  if (!agent.sessionActive && !inputVisible) {
-    hint = configured ? "CLICK THE ORB TO TALK · PRESS / TO TYPE" : "OPEN SETTINGS TO ADD YOUR API KEY";
-  } else if (agent.mode === "text" && agent.state === "idle") {
+  if (!agent.sessionActive) {
+    hint = configured ? "CLICK THE ORB TO TALK · OR TYPE BELOW" : "OPEN SETTINGS TO ADD YOUR API KEY";
+  } else if (textMode && agent.state === "idle" && agent.transcript.length === 0) {
     hint = "TYPE BELOW · ENTER TO SEND";
   }
 
@@ -241,12 +233,50 @@ export default function Home() {
         </div>
       </main>
 
-      {/* Captions */}
-      {mounted && captions && (
+      {/* Typing-mode transcript — the silent conversation log */}
+      {mounted && textMode && !workbench && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-[5.75rem] z-10 flex justify-center px-6">
+          <div
+            ref={transcriptRef}
+            role="log"
+            aria-live="polite"
+            aria-label="Conversation with Infinity"
+            className="infinity-scroll pointer-events-auto flex max-h-[30vh] w-full max-w-md flex-col justify-end gap-2.5 overflow-y-auto overscroll-contain pb-1"
+          >
+            <AnimatePresence initial={false}>
+              {agent.transcript.map((m) => (
+                <motion.div
+                  key={m.id}
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.22 }}
+                  className={
+                    m.role === "user"
+                      ? "ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-white/[0.07] px-3.5 py-2 text-[13px] leading-relaxed text-zinc-400"
+                      : "mr-auto max-w-[85%] rounded-2xl rounded-bl-md border border-white/[0.06] bg-white/[0.03] px-3.5 py-2 text-[13px] leading-relaxed text-zinc-200/90"
+                  }
+                >
+                  {m.text}
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </div>
+        </div>
+      )}
+
+      {/* Workbench + typing mode: latest reply as a single dim line */}
+      {mounted && workbench && textMode && agent.lastReply && (
+        <p className="pointer-events-none absolute inset-x-0 bottom-[4.5rem] z-20 truncate px-10 text-center text-[11px] tracking-wide text-zinc-500">
+          {agent.lastReply}
+        </p>
+      )}
+
+      {/* Captions — voice mode only (typing mode has the transcript) */}
+      {mounted && captions && agent.mode !== "text" && (
         <div
-          className={`pointer-events-none absolute inset-x-0 z-10 flex justify-center px-6 transition-opacity duration-700 ${
+          className={`pointer-events-none absolute inset-x-0 bottom-24 z-10 flex justify-center px-6 transition-opacity duration-700 ${
             workbench ? "opacity-0" : "opacity-100"
-          } ${inputVisible ? "bottom-24" : "bottom-8"}`}
+          }`}
         >
           <div className="max-w-xl space-y-1.5 text-center" aria-live="polite">
             <AnimatePresence>
@@ -272,51 +302,42 @@ export default function Home() {
                   {agent.lastUser}
                 </motion.p>
               )}
-              {(agent.state === "speaking" ||
-                agent.state === "listening" ||
-                (agent.mode === "text" && agent.state === "idle")) &&
-                agent.lastReply && (
-                  <motion.p
-                    key={agent.lastReply}
-                    initial={{ opacity: 0, y: 6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0 }}
-                    className="line-clamp-2 text-[15px] leading-relaxed text-zinc-300/90"
-                  >
-                    {agent.lastReply}
-                  </motion.p>
-                )}
+              {(agent.state === "speaking" || agent.state === "listening") && agent.lastReply && (
+                <motion.p
+                  key={agent.lastReply}
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  className="line-clamp-2 text-[15px] leading-relaxed text-zinc-300/90"
+                >
+                  {agent.lastReply}
+                </motion.p>
+              )}
             </AnimatePresence>
           </div>
         </div>
       )}
 
-      {/* Text input (press / anytime, or automatic when mic is unavailable) */}
-      <AnimatePresence>
-        {inputVisible && (
-          <motion.form
-            key="textinput"
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 8 }}
-            transition={{ duration: 0.2 }}
-            onSubmit={submitText}
-            className="absolute inset-x-0 bottom-0 z-20 flex justify-center px-6 pb-7"
-          >
-            <input
-              ref={inputRef}
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              maxLength={500}
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="Type to Infinity · Enter to send"
-              aria-label="Type a message to Infinity"
-              className="w-full max-w-sm rounded-full border border-white/10 bg-white/[0.06] px-5 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500/40 focus:outline-none"
-            />
-          </motion.form>
-        )}
-      </AnimatePresence>
+      {/* Universal typing bar — ALWAYS on screen (mic optional, sound optional).
+           Dimmed but usable in the workbench; "/" focuses it from anywhere. */}
+      <form
+        onSubmit={submitText}
+        className={`absolute inset-x-0 bottom-0 z-20 flex justify-center px-6 pb-[max(1.75rem,env(safe-area-inset-bottom))] transition-opacity duration-700 ${
+          workbench ? "opacity-40" : "opacity-100"
+        }`}
+      >
+        <input
+          ref={inputRef}
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          maxLength={500}
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="Type to Infinity · Enter to send"
+          aria-label="Type a message to Infinity"
+          className="w-full max-w-sm rounded-full border border-white/10 bg-white/[0.06] px-5 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500/40 focus:outline-none"
+        />
+      </form>
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
 

@@ -10,7 +10,7 @@ import {
   matchWorkbenchCommand,
   type WorkbenchAction,
 } from "@/lib/infinity/workbench";
-import { MAX_MODELS, nextSlot } from "@/lib/infinity/holo";
+import { MAX_MODELS, nextSlot, SPAWN_SETTLE_MS } from "@/lib/infinity/holo";
 import { ASSEMBLE_MS, matchLibraryModel } from "@/lib/infinity/holo-library";
 import { generateModel, matchPhraseModel } from "@/lib/infinity/holo-generator";
 import type { BuildingState } from "@/components/infinity/workbench-models";
@@ -550,7 +550,12 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
           // Progress tracks the actual on-screen part-by-part assembly.
           const t0 = performance.now();
           const iv = window.setInterval(() => {
-            const frac = Math.min(1, (performance.now() - t0) / ASSEMBLE_MS);
+            // Assembly starts once the card's spawn animation has settled
+            // (the 3D canvas mounts then — see SPAWN_SETTLE_MS).
+            const frac = Math.min(
+              1,
+              Math.max(0, (performance.now() - t0 - SPAWN_SETTLE_MS) / ASSEMBLE_MS)
+            );
             setBuilding((b) =>
               b
                 ? {
@@ -567,7 +572,9 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
           if (!activeRef.current && !sessionRef.current) {
             setAgentState("idle");
           }
-          await sleep(Math.max(0, ASSEMBLE_MS + 400 - (performance.now() - t0)));
+          await sleep(
+            Math.max(0, SPAWN_SETTLE_MS + ASSEMBLE_MS + 400 - (performance.now() - t0))
+          );
           window.clearInterval(iv);
 
           setBuilding((b) => (b ? { ...b, phase: "done", progress: 1 } : b));

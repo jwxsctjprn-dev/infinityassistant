@@ -6,6 +6,7 @@ import { Trash2 } from "lucide-react";
 import { HoloModelMesh } from "./holo-model-mesh";
 import { useInfinity } from "@/lib/infinity/settings";
 import { ASSEMBLE_MS } from "@/lib/infinity/holo-library";
+import { SPAWN_SETTLE_MS } from "@/lib/infinity/holo";
 import { HOLO_SCALE_MAX, HOLO_SCALE_MIN } from "@/lib/infinity/types";
 import type { HoloModel } from "@/lib/infinity/types";
 
@@ -114,8 +115,9 @@ function BuildProgress({ building }: { building: BuildingState }) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Draggable / rotatable model card with hover controls                 */
-/* (L-corner resize handle + red holographic delete button)             */
+/* Model card — controls hug the ACTUAL hologram via a projected        */
+/* bounds frame (see holo-model-mesh): drag to move / shift-drag to     */
+/* rotate, L-corner to resize, red button to delete, label above.       */
 /* ------------------------------------------------------------------ */
 
 const scaleChip = (v: number) => Math.round(v * 100) / 100;
@@ -124,6 +126,8 @@ function ModelCard({ model }: { model: HoloModel }) {
   const updateModel = useInfinity((s) => s.updateModel);
   const removeModel = useInfinity((s) => s.removeModel);
   const rootRef = useRef<HTMLDivElement>(null);
+  /** Tracks the hologram's true projected bounds — controls live inside it. */
+  const frameRef = useRef<HTMLDivElement>(null);
   const dragState = useRef<{
     mode: "move" | "rotate";
     startX: number;
@@ -135,6 +139,15 @@ function ModelCard({ model }: { model: HoloModel }) {
   const [dragging, setDragging] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [resizing, setResizing] = useState(false);
+  /** Mount the 3D canvas only after the spawn animation settles — R3F sizes
+   * the canvas with a transform-aware measurement and would otherwise catch
+   * the mid-animation scale (see holo-model-mesh CameraRig). */
+  const [meshReady, setMeshReady] = useState(false);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => setMeshReady(true), SPAWN_SETTLE_MS);
+    return () => window.clearTimeout(t);
+  }, []);
 
   const scale = model.scale ?? 1;
   const showHandles = hovered || resizing;
@@ -190,14 +203,25 @@ function ModelCard({ model }: { model: HoloModel }) {
     setDragging(false);
   }, []);
 
-  /* ---- resize: drag the L corner — pull away from the center to grow */
+  /* ---- resize: drag the L corner — pull away from the object to grow.
+   * Double-tap the corner to reset to 100%. */
+
+  const lastHandleDown = useRef(0);
 
   const startResize = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       // never let the card drag fire from the handle
       e.stopPropagation();
       e.preventDefault();
-      const rect = rootRef.current?.getBoundingClientRect();
+      // double-tap/double-click the corner → reset size (OS-like threshold)
+      const now = performance.now();
+      if (now - lastHandleDown.current < 450) {
+        lastHandleDown.current = 0;
+        updateModel(model.id, { scale: 1 });
+        return;
+      }
+      lastHandleDown.current = now;
+      const rect = frameRef.current?.getBoundingClientRect();
       if (!rect) return;
       const cx = rect.left + rect.width / 2;
       const cy = rect.top + rect.height / 2;
@@ -225,7 +249,7 @@ function ModelCard({ model }: { model: HoloModel }) {
     [model.id, model.scale, updateModel]
   );
 
-  /* ---- resize via keyboard (handle is a slider) */
+  /* ---- resize via keyboard (handle is a slider) + double-click reset */
 
   const onHandleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -245,6 +269,10 @@ function ModelCard({ model }: { model: HoloModel }) {
     [model.id, scale, updateModel]
   );
 
+  const resetScale = useCallback(() => {
+    updateModel(model.id, { scale: 1 });
+  }, [model.id, updateModel]);
+
   const onDeleteClick = useCallback(
     (e: React.MouseEvent<HTMLButtonElement>) => {
       e.stopPropagation();
@@ -253,23 +281,18 @@ function ModelCard({ model }: { model: HoloModel }) {
     [model.id, removeModel]
   );
 
-  const labelText =
-    resizing || (showHandles && pct !== 100) ? `${model.name} · ${pct}%` : model.name;
+  const labelText = pct !== 100 ? `${model.name} · ${pct}%` : model.name;
 
   return (
     <div
       ref={rootRef}
-      className="holo-card pointer-events-auto absolute h-44 w-44 -translate-x-1/2 -translate-y-1/2 touch-none select-none sm:h-56 sm:w-56"
+      className="holo-card pointer-events-none absolute h-44 w-44 -translate-x-1/2 -translate-y-1/2 select-none sm:h-56 sm:w-56"
       style={{ left: `${model.pos.x}%`, top: `${model.pos.y}%` }}
-      onPointerEnter={() => setHovered(true)}
-      onPointerLeave={() => setHovered(false)}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
       onContextMenu={(e) => e.preventDefault()}
-      role="img"
-      aria-label={`Holographic model: ${model.name}. Drag to move, shift-drag to rotate. Hover for resize and delete controls.`}
     >
       <motion.div
         className="relative h-full w-full"
@@ -283,104 +306,123 @@ function ModelCard({ model }: { model: HoloModel }) {
         }}
         transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
       >
-        {/* projector glow under the model — grows with the hologram */}
-        <div
-          aria-hidden
-          className="absolute inset-x-[8%] bottom-[6%] h-[14%] rounded-[50%] bg-sky-400/10 blur-md"
-          style={{
-            transform: `scale(${Math.min(scale, 1.75)})`,
-            transformOrigin: "bottom center",
-          }}
-        />
-        <HoloModelMesh
-          spec={model.spec}
-          rot={model.rot}
-          scale={scale}
-          assembleMs={
-            model.bornAt && Date.now() - model.bornAt < ASSEMBLE_MS + 800
-              ? ASSEMBLE_MS
-              : undefined
-          }
-        />
-        <span
-          aria-hidden
-          className={`absolute -bottom-1 left-1/2 -translate-x-1/2 whitespace-nowrap text-[9px] font-light uppercase tracking-[0.3em] transition-opacity ${
-            dragging || resizing || hovered
-              ? "text-sky-300/60 opacity-100"
-              : "text-sky-300/30 opacity-70"
-          }`}
-        >
-          {labelText}
-        </span>
-
-        {/* ---- one small L-style corner: drag to resize the hologram ---- */}
-        <div
-          role="slider"
-          aria-label={`Resize ${model.name} hologram`}
-          aria-valuemin={Math.round(HOLO_SCALE_MIN * 100)}
-          aria-valuemax={Math.round(HOLO_SCALE_MAX * 100)}
-          aria-valuenow={pct}
-          aria-valuetext={`${pct} percent size`}
-          tabIndex={showHandles ? 0 : -1}
-          onPointerDown={startResize}
-          onKeyDown={onHandleKeyDown}
-          className={`absolute bottom-0 right-0 flex h-10 w-10 cursor-nwse-resize touch-none items-end justify-end rounded-tl-lg p-[5px] outline-none transition-opacity duration-200 focus-visible:ring-1 focus-visible:ring-sky-300/70 ${
-            showHandles ? "opacity-100" : "pointer-events-none opacity-0"
-          }`}
-        >
-          <svg
-            width="17"
-            height="17"
-            viewBox="0 0 17 17"
-            fill="none"
-            aria-hidden="true"
-            className={`transition-colors duration-150 ${
-              resizing
-                ? "text-cyan-200 drop-shadow-[0_0_6px_rgba(103,232,249,1)]"
-                : "text-sky-300/90 drop-shadow-[0_0_5px_rgba(125,211,252,0.85)]"
-            }`}
-          >
-            <path
-              d="M16 5.5V16H5.5"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-            <path
-              d="M16 10V16H10"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              opacity="0.55"
-            />
-          </svg>
-        </div>
-
-        {/* live size readout while resizing */}
-        {resizing && (
-          <span className="absolute bottom-11 right-1.5 rounded border border-sky-300/30 bg-sky-500/10 px-1.5 py-0.5 font-mono text-[9px] tracking-wider text-sky-200/90 backdrop-blur-sm">
-            {pct}%
-          </span>
+        {meshReady && (
+          <HoloModelMesh
+            spec={model.spec}
+            rot={model.rot}
+            scale={scale}
+            assembleMs={
+              model.bornAt && Date.now() - model.bornAt < ASSEMBLE_MS + 800
+                ? ASSEMBLE_MS
+                : undefined
+            }
+            frameRef={frameRef}
+          />
         )}
 
-        {/* ---- red holographic delete button ---- */}
-        <button
-          type="button"
-          aria-label={`Delete ${model.name} hologram`}
-          aria-hidden={!showHandles}
-          tabIndex={showHandles ? 0 : -1}
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={onDeleteClick}
-          className={`absolute -right-2.5 -top-2.5 flex h-8 w-8 items-center justify-center rounded-full border border-red-400/60 bg-red-500/15 text-red-300 shadow-[0_0_16px_rgba(248,113,113,0.35)] backdrop-blur-sm transition-all duration-200 hover:scale-110 hover:border-red-300/90 hover:bg-red-500/30 hover:text-red-100 hover:shadow-[0_0_24px_rgba(248,113,113,0.55)] active:scale-90 ${
-            showHandles
-              ? "scale-100 opacity-100"
-              : "pointer-events-none scale-75 opacity-0"
-          }`}
+        {/* ---- the object frame: positioned every frame to the hologram's
+             true projected bounds — everything below hugs the object ---- */}
+        <div
+          ref={frameRef}
+          role="img"
+          aria-label={`Holographic model: ${model.name}. Drag to move, shift-drag to rotate. Hover for resize and delete controls.`}
+          tabIndex={0}
+          className="pointer-events-auto absolute cursor-grab touch-none rounded-lg outline-none transition-shadow duration-200 focus-visible:ring-1 focus-visible:ring-sky-300/50 active:cursor-grabbing"
+          style={{ left: "15%", top: "15%", width: "70%", height: "70%" }}
+          onPointerEnter={() => setHovered(true)}
+          onPointerLeave={() => setHovered(false)}
+          onFocus={() => setHovered(true)}
+          onBlur={() => setHovered(false)}
         >
-          <Trash2 className="h-3.5 w-3.5" strokeWidth={2.2} aria-hidden="true" />
-        </button>
+          {/* projector glow — sized to the object, grows with it */}
+          <div
+            aria-hidden
+            className="pointer-events-none absolute -bottom-[4%] left-[10%] right-[10%] h-[12%] rounded-[50%] bg-sky-400/10 blur-md"
+          />
+
+          {/* label — just above the object */}
+          <span
+            aria-hidden
+            className={`pointer-events-none absolute -top-5 left-1/2 -translate-x-1/2 whitespace-nowrap text-[9px] font-light uppercase tracking-[0.3em] transition-opacity ${
+              dragging || resizing || hovered
+                ? "text-sky-300/80 opacity-100"
+                : "text-sky-300/50 opacity-85"
+            }`}
+          >
+            {labelText}
+          </span>
+
+          {/* ---- one small L-style corner: drag to resize the hologram ---- */}
+          <div
+            role="slider"
+            aria-label={`Resize ${model.name} hologram`}
+            aria-valuemin={Math.round(HOLO_SCALE_MIN * 100)}
+            aria-valuemax={Math.round(HOLO_SCALE_MAX * 100)}
+            aria-valuenow={pct}
+            aria-valuetext={`${pct} percent size`}
+            tabIndex={showHandles ? 0 : -1}
+            title="Drag to resize · double-click to reset"
+            onPointerDown={startResize}
+            onKeyDown={onHandleKeyDown}
+            onDoubleClick={resetScale}
+            className={`absolute bottom-0 right-0 flex h-10 w-10 cursor-nwse-resize touch-none items-end justify-end rounded-tl-lg p-[5px] outline-none transition-opacity duration-200 focus-visible:ring-1 focus-visible:ring-sky-300/70 ${
+              showHandles ? "opacity-100" : "pointer-events-none opacity-0"
+            }`}
+          >
+            <svg
+              width="17"
+              height="17"
+              viewBox="0 0 17 17"
+              fill="none"
+              aria-hidden="true"
+              className={`transition-colors duration-150 ${
+                resizing
+                  ? "text-cyan-200 drop-shadow-[0_0_6px_rgba(103,232,249,1)]"
+                  : "text-sky-300/90 drop-shadow-[0_0_5px_rgba(125,211,252,0.85)]"
+              }`}
+            >
+              <path
+                d="M16 5.5V16H5.5"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <path
+                d="M16 10V16H10"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity="0.55"
+              />
+            </svg>
+          </div>
+
+          {/* live size readout while resizing */}
+          {resizing && (
+            <span className="pointer-events-none absolute bottom-11 right-1 rounded border border-sky-300/30 bg-sky-500/10 px-1.5 py-0.5 font-mono text-[9px] tracking-wider text-sky-200/90 backdrop-blur-sm">
+              {pct}%
+            </span>
+          )}
+
+          {/* ---- red holographic delete button ---- */}
+          <button
+            type="button"
+            aria-label={`Delete ${model.name} hologram`}
+            aria-hidden={!showHandles}
+            tabIndex={showHandles ? 0 : -1}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={onDeleteClick}
+            className={`absolute -right-3 -top-3 flex h-8 w-8 items-center justify-center rounded-full border border-red-400/60 bg-red-500/15 text-red-300 shadow-[0_0_16px_rgba(248,113,113,0.35)] backdrop-blur-sm transition-all duration-200 hover:scale-110 hover:border-red-300/90 hover:bg-red-500/30 hover:text-red-100 hover:shadow-[0_0_24px_rgba(248,113,113,0.55)] active:scale-90 ${
+              showHandles
+                ? "scale-100 opacity-100"
+              : "pointer-events-none scale-75 opacity-0"
+            }`}
+          >
+            <Trash2 className="h-3.5 w-3.5" strokeWidth={2.2} aria-hidden="true" />
+          </button>
+        </div>
       </motion.div>
     </div>
   );

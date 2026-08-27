@@ -58,3 +58,11 @@ export function nextSlot(count: number): { x: number; y: number } {
 }
 
 export const MAX_MODELS = 8;
+
+/**
+ * The 3D canvas mounts this long after a model card appears — the card's
+ * framer-motion spawn animation must finish first, because R3F sizes its
+ * canvas with a transform-aware measurement (see holo-model-mesh.tsx).
+ * The build progress bar and part-assembly stay synced to this delay.
+ */
+export const SPAWN_SETTLE_MS = 520;

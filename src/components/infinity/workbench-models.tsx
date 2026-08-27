@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Trash2 } from "lucide-react";
-import { HoloModelMesh } from "./holo-model-mesh";
+import { HoloModelMesh, type StressView } from "./holo-model-mesh";
 import { useInfinity } from "@/lib/infinity/settings";
 import { ASSEMBLE_MS } from "@/lib/infinity/holo-library";
 import { SPAWN_SETTLE_MS } from "@/lib/infinity/holo";
@@ -129,6 +129,13 @@ const scaleChip = (v: number) => Math.round(v * 100) / 100;
 function ModelCard({ model }: { model: HoloModel }) {
   const updateModel = useInfinity((s) => s.updateModel);
   const removeModel = useInfinity((s) => s.removeModel);
+  /** Live stress test on THIS model (null = normal hologram). */
+  const stressSession = useInfinity((s) =>
+    s.stress && s.stress.modelId === model.id ? s.stress : null
+  );
+  const stressView: StressView | null = stressSession
+    ? { phase: stressSession.phase, ratios: stressSession.ratios }
+    : null;
   const rootRef = useRef<HTMLDivElement>(null);
   /** Tracks the hologram's true projected bounds — controls live inside it. */
   const frameRef = useRef<HTMLDivElement>(null);
@@ -285,7 +292,12 @@ function ModelCard({ model }: { model: HoloModel }) {
     [model.id, removeModel]
   );
 
-  const labelText = pct !== 100 ? `${model.name} · ${pct}%` : model.name;
+  const labelText =
+    pct !== 100
+      ? `${model.name} · ${pct}%`
+      : stressSession?.score != null
+        ? `${model.name} · ${stressSession.score}/100`
+        : model.name;
 
   return (
     <div
@@ -325,6 +337,7 @@ function ModelCard({ model }: { model: HoloModel }) {
                 : undefined
             }
             frameRef={frameRef}
+            stress={stressView}
           />
         )}
 

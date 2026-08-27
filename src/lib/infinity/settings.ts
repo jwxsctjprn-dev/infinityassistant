@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { Annotation, HoloModel, Settings } from "./types";
+import type { Annotation, HoloModel, Settings, StressSession } from "./types";
 import { DEFAULT_MARKER_COLOR } from "./types";
 import { PROVIDERS } from "./providers";
 
@@ -30,6 +30,8 @@ interface InfinityStore {
   /** True while the user is in draw mode — the canvas catches pointer
    *  events instead of the models (session state — not persisted). */
   drawing: boolean;
+  /** Live reality-physics stress test on one bench model (session state). */
+  stress: StressSession | null;
   setSettings: (patch: Partial<Settings>) => void;
   resetSettings: () => void;
   setWorkbench: (v: boolean) => void;
@@ -40,6 +42,8 @@ interface InfinityStore {
     id: string,
     patch: Partial<Pick<HoloModel, "pos" | "rot" | "scale" | "spec" | "name" | "pending">>
   ) => void;
+  setStress: (s: StressSession | null) => void;
+  updateStress: (patch: Partial<StressSession>) => void;
   setDrawing: (v: boolean) => void;
   setDrawColor: (c: string) => void;
   addAnnotation: (a: Annotation) => void;
@@ -56,18 +60,29 @@ export const useInfinity = create<InfinityStore>()(
       annotations: [],
       drawColor: DEFAULT_MARKER_COLOR,
       drawing: false,
+      stress: null,
       setSettings: (patch) =>
         set((state) => ({ settings: { ...state.settings, ...patch } })),
       resetSettings: () => set({ settings: DEFAULT_SETTINGS }),
-      setWorkbench: (v) => set({ workbench: v }),
+      setWorkbench: (v) =>
+        set((state) => ({ workbench: v, ...(v ? {} : { stress: null }) })),
       addModel: (m) => set((state) => ({ models: [...state.models, m] })),
       removeModel: (id) =>
-        set((state) => ({ models: state.models.filter((x) => x.id !== id) })),
-      clearModels: () => set({ models: [] }),
+        set((state) => ({
+          models: state.models.filter((x) => x.id !== id),
+          // a stress test dies with its model
+          stress: state.stress?.modelId === id ? null : state.stress,
+        })),
+      clearModels: () => set({ models: [], stress: null }),
       updateModel: (id, patch) =>
         set((state) => ({
           models: state.models.map((x) => (x.id === id ? { ...x, ...patch } : x)),
         })),
+      setStress: (s) => set({ stress: s }),
+      updateStress: (patch) =>
+        set((state) =>
+          state.stress ? { stress: { ...state.stress, ...patch } } : state
+        ),
       setDrawing: (v) => set({ drawing: v }),
       setDrawColor: (c) => set({ drawColor: c }),
       addAnnotation: (a) =>

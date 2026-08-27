@@ -8,6 +8,7 @@ import { SettingsDialog } from "@/components/infinity/settings-dialog";
 import { WorkbenchGrid } from "@/components/infinity/workbench-grid";
 import { WorkbenchModels } from "@/components/infinity/workbench-models";
 import { WorkbenchDraw } from "@/components/infinity/workbench-draw";
+import { StressHud } from "@/components/infinity/stress-hud";
 import { Toaster } from "@/components/ui/sonner";
 import { useInfinityAgent } from "@/hooks/use-infinity-agent";
 import { isConfigured, useInfinity } from "@/lib/infinity/settings";
@@ -105,6 +106,11 @@ export default function Home() {
           useInfinity.getState().setDrawing(false);
           return;
         }
+        // Stress results peel off before the bench itself.
+        if (useInfinity.getState().stress) {
+          useInfinity.getState().setStress(null);
+          return;
+        }
         if (workbench) {
           setWorkbench(false);
           return;
@@ -168,6 +174,8 @@ export default function Home() {
       {gridVisible && <WorkbenchModels building={agent.building} />}
       {/* Marker annotations + the floating marker tool (workbench only) */}
       {gridVisible && <WorkbenchDraw />}
+      {/* Reality physics stress-test results panel */}
+      {gridVisible && <StressHud />}
 
       {/* Settings */}
       <button

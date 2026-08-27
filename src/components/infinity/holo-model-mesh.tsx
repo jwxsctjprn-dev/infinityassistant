@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
-import type { HoloPart, HoloSpec } from "@/lib/infinity/types";
+import type { HoloPart, HoloSpec, StressPhase } from "@/lib/infinity/types";
 
 function geometryFor(type: HoloPartType): THREE.BufferGeometry {
   switch (type) {
@@ -25,17 +25,119 @@ function geometryFor(type: HoloPartType): THREE.BufferGeometry {
 }
 type HoloPartType = HoloPart["type"];
 
-function PartMesh({ part }: { part: HoloPart }) {
+/** Everything PartMesh needs each frame to paint the stress overlay. */
+interface StressCtl {
+  phase: StressPhase;
+  /** 0..1 risk per part (final values). */
+  ratios: number[];
+  /** ms timestamp when the reveal sweep started (phase "revealing"). */
+  revealStart: number;
+  /** Bottom of each part in model space (for the bottom-up sweep). */
+  minYs: number[];
+  objMinY: number;
+  objH: number;
+}
+
+/* Orange → red risk colors (highlight ramp). */
+const ORANGE = new THREE.Color("#fb923c");
+const RED = new THREE.Color("#ef4444");
+
+function PartMesh({
+  part,
+  index,
+  stressCtl,
+}: {
+  part: HoloPart;
+  index: number;
+  /** Shared mutable control object — read imperatively every frame. */
+  stressCtl?: { current: StressCtl | null };
+}) {
   const geometry = useMemo(() => geometryFor(part.type), [part.type]);
-  const color = useMemo(() => new THREE.Color(part.color), [part.color]);
+  const baseColor = useMemo(() => new THREE.Color(part.color), [part.color]);
+  const fillRef = useRef<THREE.MeshStandardMaterial>(null);
+  const wireRef = useRef<THREE.MeshBasicMaterial>(null);
+  const tmp = useMemo(() => new THREE.Color(), []);
+
+  useFrame((state) => {
+    const fill = fillRef.current;
+    const wire = wireRef.current;
+    if (!fill || !wire) return;
+    const s = stressCtl?.current;
+
+    if (!s) {
+      // normal hologram look
+      fill.color.copy(baseColor);
+      fill.emissive.copy(baseColor);
+      fill.emissiveIntensity = 0.85;
+      fill.opacity = 0.16;
+      wire.color.copy(baseColor);
+      wire.opacity = 0.5;
+      return;
+    }
+
+    // Which parts have the sweep reached? Bottom-up reveal, then all.
+    let revealed = true;
+    if (s.phase === "revealing") {
+      const t = Math.min(1, (performance.now() - s.revealStart) / 1250);
+      const at = s.objH > 0 ? (s.minYs[index] - s.objMinY) / s.objH : 1;
+      revealed = t >= at;
+    }
+    const ratio = revealed ? s.ratios[index] ?? 0 : 0;
+    const now = state.clock.elapsedTime;
+
+    if (s.phase === "scanning") {
+      // being measured: brief white-hot flicker as the beam passes
+      const at = s.objH > 0 ? (s.minYs[index] - s.objMinY) / s.objH : 1;
+      const sweep = (now * 0.75) % 1;
+      const near = Math.exp(-Math.pow((at - sweep) * 6, 2));
+      fill.color.copy(baseColor).lerp(ORANGE, 0.55 * near);
+      fill.emissive.copy(baseColor).lerp(ORANGE, near);
+      fill.emissiveIntensity = 0.85 + 1.6 * near;
+      wire.color.copy(baseColor).lerp(ORANGE, near);
+      wire.opacity = 0.5 + 0.35 * near;
+      return;
+    }
+
+    // revealing / done — weak points glow orange→red with a living pulse
+    const risk = ratio;
+    if (risk >= 0.42) {
+      const hot = risk >= 0.72;
+      const c = hot ? RED : ORANGE;
+      // blend strength ramps 0.42→0.72 orange, then red saturates to 1
+      const blend = hot ? Math.min(1, 0.65 + 0.35 * (risk - 0.72) / 0.28) : (risk - 0.42) / 0.3;
+      const pulse = 0.5 + 0.5 * Math.sin(now * 4.6 + index * 0.8);
+      fill.color.copy(baseColor).lerp(c, Math.min(1, blend * 0.9));
+      fill.emissive.copy(c);
+      fill.emissiveIntensity = 0.55 + 1.5 * risk * (0.55 + 0.45 * pulse);
+      fill.opacity = 0.2 + 0.14 * risk * pulse;
+      wire.color.copy(c);
+      wire.opacity = 0.55 + 0.35 * pulse * risk;
+    } else if (risk > 0.18) {
+      // mild concern: faint amber tint, no pulse
+      fill.color.copy(baseColor).lerp(ORANGE, risk * 0.9);
+      fill.emissive.copy(baseColor);
+      fill.emissiveIntensity = 0.85;
+      wire.color.copy(baseColor);
+      wire.opacity = 0.5;
+    } else {
+      // sound members dim slightly so the weak points pop
+      fill.color.copy(baseColor);
+      fill.emissive.copy(baseColor);
+      fill.emissiveIntensity = 0.62;
+      fill.opacity = 0.13;
+      wire.color.copy(baseColor);
+      wire.opacity = 0.38;
+    }
+  });
 
   return (
     <group position={part.position} rotation={part.rotation} scale={part.scale}>
       {/* volumetric fill */}
       <mesh geometry={geometry}>
         <meshStandardMaterial
-          color={color}
-          emissive={color}
+          ref={fillRef}
+          color={baseColor}
+          emissive={baseColor}
           emissiveIntensity={0.85}
           transparent
           opacity={0.16}
@@ -47,11 +149,61 @@ function PartMesh({ part }: { part: HoloPart }) {
       {/* wireframe shell — the holographic read */}
       <mesh geometry={geometry} scale={1.003}>
         <meshBasicMaterial
-          color={color}
+          ref={wireRef}
+          color={baseColor}
           wireframe
           transparent
           opacity={0.5}
           depthWrite={false}
+        />
+      </mesh>
+    </group>
+  );
+}
+
+/** The analyzer's scanning beam — a glowing plane sweeping bottom→top. */
+function ScanBeam({ ctl }: { ctl: { current: StressCtl | null } }) {
+  const beamRef = useRef<THREE.Mesh>(null);
+  const glowRef = useRef<THREE.Mesh>(null);
+  useFrame((state) => {
+    const s = ctl.current;
+    const beam = beamRef.current;
+    const glow = glowRef.current;
+    if (!s || !beam || !glow) return;
+    const span = Math.max(0.001, s.objH) * 1.25;
+    const t = s.phase === "revealing"
+      ? Math.min(1, (performance.now() - s.revealStart) / 1250)
+      : (state.clock.elapsedTime * 0.75) % 1;
+    const y = s.objMinY - 0.15 + t * span;
+    beam.position.y = y;
+    glow.position.y = y;
+    const fade = s.phase === "revealing" ? 1 - t * 0.85 : 1;
+    (beam.material as THREE.MeshBasicMaterial).opacity = 0.55 * fade;
+    (glow.material as THREE.MeshBasicMaterial).opacity = 0.16 * fade;
+  });
+  const size = 4.6;
+  return (
+    <group>
+      <mesh ref={beamRef} rotation={[-Math.PI / 2, 0, 0]}>
+        <planeGeometry args={[size, size]} />
+        <meshBasicMaterial
+          color="#fdba74"
+          transparent
+          opacity={0.55}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
+      <mesh ref={glowRef} rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]}>
+        <planeGeometry args={[size * 1.25, size * 1.25]} />
+        <meshBasicMaterial
+          color="#f97316"
+          transparent
+          opacity={0.16}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+          side={THREE.DoubleSide}
         />
       </mesh>
     </group>
@@ -131,6 +283,12 @@ function CameraRig() {
   return null;
 }
 
+/** Live stress-test view passed down from the model card. */
+export interface StressView {
+  phase: StressPhase;
+  ratios: number[];
+}
+
 function SpecGroup({
   spec,
   rot,
@@ -138,6 +296,7 @@ function SpecGroup({
   assembleMs,
   scale = 1,
   frameRef,
+  stress,
 }: {
   spec: HoloSpec;
   rot: { x: number; y: number };
@@ -146,6 +305,8 @@ function SpecGroup({
   scale?: number;
   /** Overlay div that tracks the hologram's projected bounds (card-relative %). */
   frameRef?: RefObject<HTMLDivElement | null>;
+  /** Stress-test overlay state (null = normal hologram). */
+  stress?: StressView | null;
 }) {
   const group = useRef<THREE.Group>(null);
   // Timed assembly (fresh local builds) reveals parts one-by-one via state;
@@ -157,6 +318,72 @@ function SpecGroup({
   // All part corners (model space) — projecting these each frame yields the
   // TIGHT silhouette bounds of the hologram, so the overlay frame hugs it.
   const corners = useMemo(() => specCorners(spec), [spec]);
+
+  // ---- stress overlay control (imperative — zero re-renders per frame) ----
+  const stressCtl = useRef<StressCtl | null>(null);
+  const prevPhase = useRef<StressPhase | null>(null);
+  const bounds = useMemo(() => {
+    let minY = Infinity;
+    let maxY = -Infinity;
+    const minYs: number[] = [];
+    const euler = new THREE.Euler();
+    const quat = new THREE.Quaternion();
+    const v = new THREE.Vector3();
+    for (const part of spec.parts) {
+      const h = UNIT_HALF_EXTENTS[part.type] ?? [1, 1, 1];
+      euler.set(part.rotation[0], part.rotation[1], part.rotation[2]);
+      quat.setFromEuler(euler);
+      let pMin = Infinity;
+      let pMax = -Infinity;
+      for (let i = 0; i < 8; i++) {
+        v.set(
+          (i & 1 ? h[0] : -h[0]) * Math.abs(part.scale[0]),
+          (i & 2 ? h[1] : -h[1]) * Math.abs(part.scale[1]),
+          (i & 4 ? h[2] : -h[2]) * Math.abs(part.scale[2])
+        ).applyQuaternion(quat);
+        pMin = Math.min(pMin, v.y);
+        pMax = Math.max(pMax, v.y);
+      }
+      minYs.push(part.position[1] + pMin);
+      minY = Math.min(minY, part.position[1] + pMin);
+      maxY = Math.max(maxY, part.position[1] + pMax);
+    }
+    if (!spec.parts.length) {
+      minY = -1;
+      maxY = 1;
+    }
+    return { minY, maxY, minYs };
+  }, [spec]);
+
+  // Refresh the control object whenever the stress view changes. The reveal
+  // clock restarts exactly when the phase ENTERS "revealing".
+  if (stress) {
+    if (stress.phase === "revealing" && prevPhase.current !== "revealing") {
+      stressCtl.current = {
+        phase: stress.phase,
+        ratios: stress.ratios,
+        revealStart: performance.now(),
+        minYs: bounds.minYs,
+        objMinY: bounds.minY,
+        objH: bounds.maxY - bounds.minY,
+      };
+    } else if (stress.phase !== "revealing" || !stressCtl.current) {
+      stressCtl.current = {
+        phase: stress.phase,
+        ratios: stress.ratios,
+        revealStart: 0,
+        minYs: bounds.minYs,
+        objMinY: bounds.minY,
+        objH: bounds.maxY - bounds.minY,
+      };
+    } else if (stress.ratios !== stressCtl.current.ratios) {
+      stressCtl.current = { ...stressCtl.current, ratios: stress.ratios };
+    }
+    prevPhase.current = stress.phase;
+  } else {
+    stressCtl.current = null;
+    prevPhase.current = null;
+  }
 
   const tmp = useRef(new THREE.Vector3());
   const lastFrame = useRef({ l: -999, t: -999, w: -999, h: -999 });
@@ -232,8 +459,11 @@ function SpecGroup({
   return (
     <group ref={group}>
       {spec.parts.slice(0, visible).map((p, i) => (
-        <PartMesh key={i} part={p} />
+        <PartMesh key={i} part={p} index={i} stressCtl={stressCtl} />
       ))}
+      {stress && (stress.phase === "scanning" || stress.phase === "revealing") && (
+        <ScanBeam ctl={stressCtl} />
+      )}
     </group>
   );
 }
@@ -253,6 +483,7 @@ export function HoloModelMesh({
   subtleBob = true,
   assembleMs,
   frameRef,
+  stress,
 }: {
   spec: HoloSpec;
   rot: { x: number; y: number };
@@ -263,6 +494,8 @@ export function HoloModelMesh({
   assembleMs?: number;
   /** Overlay div that tracks the hologram's projected bounds. */
   frameRef?: RefObject<HTMLDivElement | null>;
+  /** Live stress-test overlay (weak-point heat colors + scan beam). */
+  stress?: StressView | null;
 }) {
   return (
     <Canvas
@@ -291,6 +524,7 @@ export function HoloModelMesh({
         assembleMs={assembleMs}
         scale={scale}
         frameRef={frameRef}
+        stress={stress}
       />
     </Canvas>
   );

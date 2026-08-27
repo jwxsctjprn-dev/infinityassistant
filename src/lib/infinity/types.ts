@@ -105,6 +105,50 @@ export const HOLO_SCALE_MIN = 0.4;
 export const HOLO_SCALE_MAX = 2.5;
 
 /* ------------------------------------------------------------------ */
+/* Reality physics stress test                                          */
+/* ------------------------------------------------------------------ */
+
+export type StressPhase = "scanning" | "revealing" | "done";
+
+/** One structural weak point found by the analysis. */
+export interface StressWeakPoint {
+  role: string;
+  material: string;
+  mode: string;
+  /** Load at which this member gives way (kg). */
+  failsKg: number;
+  /** 0..1 — drives the orange→red highlight. */
+  risk: number;
+}
+
+/** Live stress-test session on one workbench model (session state). */
+export interface StressSession {
+  modelId: string;
+  name: string;
+  phase: StressPhase;
+  /** Total parts in the model under test. */
+  partCount: number;
+  /** Parts the analyzer has identified so far (live while streaming). */
+  partsAnalyzed: number;
+  /** 0..1 risk per part — final values, revealed bottom-up. */
+  ratios: number[];
+  score: number | null;
+  verdict: string | null;
+  structScore: number | null;
+  impactScore: number | null;
+  thermalScore: number | null;
+  materialsUsed: string[];
+  weakPoints: StressWeakPoint[];
+  massKg: number | null;
+  heightM: number | null;
+  loadKg: number | null;
+  dropNote: string | null;
+  thermalNote: string | null;
+  /** True while the spoken summary is still playing. */
+  speaking?: boolean;
+}
+
+/* ------------------------------------------------------------------ */
 /* Workbench annotations (marker drawing)                              */
 /* ------------------------------------------------------------------ */
 
@@ -142,4 +186,5 @@ export const DEFAULT_SYSTEM_PROMPT =
   "You and the user share a holographic workbench: a live snapshot of whatever is on it arrives with " +
   "each message, so you can genuinely see and chat about the models there — what they are, where they " +
   "sit, how big they are, and what they're made of. The user may call it the workshop, studio, lab, or " +
-  "workspace — it's all the same bench.";
+  "workspace — it's all the same bench. You can also run reality physics stress tests on any bench " +
+  "model — tell the user to say \"run a stress test for\" followed by the object's name.";

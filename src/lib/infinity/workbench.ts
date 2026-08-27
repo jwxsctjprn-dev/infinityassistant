@@ -183,3 +183,44 @@ export function matchDeleteCommand(input: string, modelNames: string[]): DeleteC
   }
   return null;
 }
+
+/* ------------------------------------------------------------------ */
+/* Reality physics stress test commands                                 */
+/* ------------------------------------------------------------------ */
+
+export interface StressCommand {
+  /** The object to test — "" means "it"/"the model" (referent). */
+  object: string;
+}
+
+/**
+ * "run a stress test for the chair" / "stress test the ladder" /
+ * "do a physics stress test on it" / "run a reality stress test for my
+ * bridge" → the reality physics stress test command.
+ */
+export function matchStressTestCommand(input: string): StressCommand | null {
+  const t = normalizeUtterance(input);
+  if (!t) return null;
+  if (QUESTION_RE.test(t)) return null; // "what does the stress test do?" → chat
+  if (!/\bstress\s+tests?\b/.test(t)) return null;
+
+  // "run/do/perform … stress test for/on/of X"
+  let m =
+    t.match(/\bstress\s+tests?\s+(?:for|on|of)\s+(.+)$/) ??
+    t.match(/\bstress\s+tests?\s+(?:the|a|an|my|this|that|it|them|him|her)\s*(.*)$/);
+  if (!m) return null;
+
+  let object = (m[1] ?? "").trim();
+  // "run a stress test" with a bare referent ("stress test it")
+  object = object
+    .replace(/^(?:the|a|an|my|this|that|some)\s+/, "")
+    .replace(/\b(?:model|hologram|holographic|please|now|quickly|again)\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  // Pronouns are referents, not object names ("stress test for it").
+  if (/^(?:it|them|this|that|one|him|her|the one|the model|the object)$/.test(object)) {
+    object = "";
+  }
+  if (object.split(" ").length > 6) return null;
+  return { object };
+}

@@ -8,6 +8,20 @@ export type WorkbenchAction = "open" | "close";
 const OPEN_RE = /\b(open|start|enter|show|enable|activate|launch|begin|turn on)\b/;
 const CLOSE_RE = /\b(close|exit|leave|stop|end|disable|hide|quit|turn off)\b/;
 
+/** Question words — an utterance ASKING about things ("what's on the
+ *  workbench?", "what did you build?") must reach the conversation LLM,
+ *  which has live vision of the bench. Never let it trigger a command. */
+const QUESTION_RE = /\b(what|whats|which|why|who|whose|where|how|describe|explain|tell)\b/;
+
+/** Normalized lowercase word stream for the matchers below. */
+function normalizeUtterance(input: string): string {
+  return input
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s]/g, "")
+    .replace(/\s+/g, " ");
+}
+
 /**
  * Returns "open" / "close" when the utterance looks like a workbench
  * command, otherwise null (→ treat as a normal conversation turn).
@@ -19,6 +33,7 @@ export function matchWorkbenchCommand(input: string): WorkbenchAction | null {
     .trim()
     .replace(/[^a-z\s]/g, "")
     .replace(/\s+/g, " ");
+  if (QUESTION_RE.test(t)) return null; // "show me what's on the workbench" → chat
   if (!t.includes("workbench")) return null;
 
   const words = t.split(" ").filter(Boolean);
@@ -70,11 +85,8 @@ const COLOR_WORDS = new Set([
  * hijacked, but "make me a rocket ship" always works).
  */
 export function matchBuildCommand(input: string, inWorkbench = false): BuildCommand | null {
-  const t = input
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9\s]/g, "")
-    .replace(/\s+/g, " ");
+  const t = normalizeUtterance(input);
+  if (QUESTION_RE.test(t)) return null; // "what did you make for me?" → chat
 
   let object = "";
 
@@ -127,12 +139,9 @@ export type DeleteCommand = { all: true } | { name: string };
  * "clear the workbench" / "delete all models" → actionable command.
  */
 export function matchDeleteCommand(input: string, modelNames: string[]): DeleteCommand | null {
-  const t = input
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9\s]/g, "")
-    .replace(/\s+/g, " ");
+  const t = normalizeUtterance(input);
   if (!t) return null;
+  if (QUESTION_RE.test(t)) return null; // "why did you delete my chair?" → chat
 
   const clearAll =
     (/\b(clear|empty|wipe|reset)\b/.test(t) && /\bworkbench\b/.test(t)) ||

@@ -10,6 +10,11 @@ import {
   matchWorkbenchCommand,
   type WorkbenchAction,
 } from "@/lib/infinity/workbench";
+import {
+  describeWorkbench,
+  matchBenchQuestion,
+  summarizeWorkbench,
+} from "@/lib/infinity/workbench-vision";
 import { MAX_MODELS, nextSlot, normalizeHoloSpec, SPAWN_SETTLE_MS } from "@/lib/infinity/holo";
 import { ASSEMBLE_MS, matchLibraryModel } from "@/lib/infinity/holo-library";
 import { generateModel, matchFamilyModel, matchPhraseModel } from "@/lib/infinity/holo-generator";
@@ -271,6 +276,17 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
   const askChat = useCallback(async (userText: string): Promise<string> => {
     const s = useInfinity.getState().settings;
     const history = [...historyRef.current, { role: "user" as const, content: userText }];
+    // WORKBENCH VISION — a fresh snapshot of the bench rides along with
+    // every turn, right before the user's message, so the LLM sees the
+    // models as they are RIGHT NOW. It is never persisted into history;
+    // each turn re-sends the current state (builds, drags, resizes, deletes
+    // are all reflected immediately).
+    const wb = useInfinity.getState();
+    const outbound = [
+      ...history.slice(0, -1),
+      { role: "system" as const, content: describeWorkbench(wb.models, wb.workbench) },
+      history[history.length - 1],
+    ];
     const ac = new AbortController();
     abortRef.current?.abort();
     abortRef.current = ac;
@@ -284,7 +300,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
           apiKey: s.apiKey.trim(),
           baseUrl: s.baseUrl.trim() || undefined,
           model: s.model.trim(),
-          messages: history.slice(-16),
+          messages: outbound.slice(-18),
           systemPrompt: s.systemPrompt.trim() || undefined,
         }),
       });
@@ -1113,7 +1129,22 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       if (tryWorkbench(t)) return;
       if (tryDelete(t)) return;
       if (tryBuild(t)) return;
+      // Keyless: the most common bench questions still get a real answer
+      // from the local snapshot instead of an error toast.
       const s = useInfinity.getState().settings;
+      if (!isConfigured(s) && matchBenchQuestion(t)) {
+        setInterim("");
+        noteUser(t);
+        setError(null);
+        void (async () => {
+          try {
+            await respond(summarizeWorkbench(useInfinity.getState().models));
+          } catch {
+            /* best effort */
+          }
+        })();
+        return;
+      }
       if (!isConfigured(s)) {
         toast("Add your API key in Settings first.", {
           action: { label: "Settings", onClick: () => onNeedSettingsRef.current() },

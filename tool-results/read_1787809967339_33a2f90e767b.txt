@@ -1,0 +1,1180 @@
+     1→"use client";
+     2→
+     3→import { useCallback, useEffect, useRef, useState } from "react";
+     4→import { toast } from "sonner";
+     5→import type { AgentState, ChatMessage } from "@/lib/infinity/types";
+     6→import { isConfigured, useInfinity } from "@/lib/infinity/settings";
+     7→import {
+     8→  matchBuildCommand,
+     9→  matchDeleteCommand,
+    10→  matchWorkbenchCommand,
+    11→  type WorkbenchAction,
+    12→} from "@/lib/infinity/workbench";
+    13→import { MAX_MODELS, nextSlot, normalizeHoloSpec, SPAWN_SETTLE_MS } from "@/lib/infinity/holo";
+    14→import { ASSEMBLE_MS, matchLibraryModel } from "@/lib/infinity/holo-library";
+    15→import { generateModel, matchFamilyModel, matchPhraseModel } from "@/lib/infinity/holo-generator";
+    16→import { cacheGetSpec, cachePutSpec, designHoloSpec } from "@/lib/infinity/holo-ai";
+    17→import type { HoloPart, HoloSpec } from "@/lib/infinity/types";
+    18→import type { BuildingState } from "@/components/infinity/workbench-models";
+    19→
+    20→/**
+    21→ * Never blind-`res.json()`: a gateway/proxy error page is HTML, and
+    22→ * WebKit's raw rejection for that is the cryptic
+    23→ * "The string did not match the pattern expected." Read text, parse safely.
+    24→ */
+    25→async function safeJson<T>(res: Response): Promise<T | null> {
+    26→  try {
+    27→    const text = await res.text();
+    28→    if (!text) return null;
+    29→    return JSON.parse(text) as T;
+    30→  } catch {
+    31→    return null;
+    32→  }
+    33→}
+    34→
+    35→/* ------------------------------------------------------------------ */
+    36→/* Minimal ambient types for the Web Speech API                        */
+    37→/* ------------------------------------------------------------------ */
+    38→
+    39→interface SpeechRecognitionAlternativeLike {
+    40→  transcript: string;
+    41→}
+    42→interface SpeechRecognitionResultLike {
+    43→  isFinal: boolean;
+    44→  length: number;
+    45→  0: SpeechRecognitionAlternativeLike;
+    46→}
+    47→interface SpeechRecognitionEventLike {
+    48→  resultIndex: number;
+    49→  results: ArrayLike<SpeechRecognitionResultLike>;
+    50→}
+    51→interface SpeechRecognitionLike {
+    52→  continuous: boolean;
+    53→  interimResults: boolean;
+    54→  lang: string;
+    55→  start(): void;
+    56→  stop(): void;
+    57→  abort(): void;
+    58→  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+    59→  onerror: ((event: { error: string }) => void) | null;
+    60→  onend: (() => void) | null;
+    61→}
+    62→type SpeechRecognitionCtor = new () => SpeechRecognitionLike;
+    63→
+    64→function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
+    65→  if (typeof window === "undefined") return null;
+    66→  const w = window as unknown as {
+    67→    SpeechRecognition?: SpeechRecognitionCtor;
+    68→    webkitSpeechRecognition?: SpeechRecognitionCtor;
+    69→  };
+    70→  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
+    71→}
+    72→
+    73→function rms(analyser: AnalyserNode, data: Uint8Array<ArrayBuffer>): number {
+    74→  analyser.getByteTimeDomainData(data);
+    75→  let sum = 0;
+    76→  for (let i = 0; i < data.length; i++) {
+    77→    const v = (data[i] - 128) / 128;
+    78→    sum += v * v;
+    79→  }
+    80→  return Math.min(1, Math.sqrt(sum / data.length) * 3.4);
+    81→}
+    82→
+    83→/* ------------------------------------------------------------------ */
+    84→
+    85→export type AgentMode = "voice" | "text";
+    86→
+    87→/** One line of the visible conversation log (typing mode). */
+    88→export interface TranscriptEntry {
+    89→  id: number;
+    90→  role: "user" | "infinity";
+    91→  text: string;
+    92→}
+    93→
+    94→interface VoiceSession {
+    95→  stopped: boolean;
+    96→  micStream: MediaStream | null;
+    97→  micAnalyser: AnalyserNode | null;
+    98→  micData: Uint8Array<ArrayBuffer> | null;
+    99→  rec: SpeechRecognitionLike | null;
+   100→  recCtor: SpeechRecognitionCtor;
+   101→  finalBuf: string;
+   102→  lastInterim: string;
+   103→  interimTimer: ReturnType<typeof setTimeout> | null;
+   104→  debounce: ReturnType<typeof setTimeout> | null;
+   105→  lastRestart: number;
+   106→}
+   107→
+   108→export interface UseInfinityAgent {
+   109→  state: AgentState;
+   110→  mode: AgentMode | null;
+   111→  sessionActive: boolean;
+   112→  interim: string;
+   113→  lastUser: string;
+   114→  lastReply: string;
+   115→  error: string | null;
+   116→  micBlocked: boolean;
+   117→  /** Visible conversation log (typing mode shows it as chat bubbles). */
+   118→  transcript: TranscriptEntry[];
+   119→  /** Live workbench build progress (null when idle). */
+   120→  building: BuildingState | null;
+   121→  /** 0..1 smoothed audio loudness for the orb (read imperatively each frame) */
+   122→  levelRef: React.MutableRefObject<number>;
+   123→  start: () => void;
+   124→  stop: () => void;
+   125→  toggle: () => void;
+   126→  sendText: (text: string) => void;
+   127→}
+   128→
+   129→export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
+   130→  const [state, setState] = useState<AgentState>("idle");
+   131→  const [mode, setMode] = useState<AgentMode | null>(null);
+   132→  const [sessionActive, setSessionActive] = useState(false);
+   133→  const [interim, setInterim] = useState("");
+   134→  const [lastUser, setLastUser] = useState("");
+   135→  const [lastReply, setLastReply] = useState("");
+   136→  const [error, setError] = useState<string | null>(null);
+   137→  const [micBlocked, setMicBlocked] = useState(false);
+   138→  const [building, setBuilding] = useState<BuildingState | null>(null);
+   139→  const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
+   140→  const transcriptIdRef = useRef(0);
+   141→
+   142→  const levelRef = useRef(0);
+   143→  const stateRef = useRef<AgentState>("idle");
+   144→  const modeRef = useRef<AgentMode | null>(null);
+   145→  const activeRef = useRef(false);
+   146→  const sessionRef = useRef<VoiceSession | null>(null);
+   147→  const historyRef = useRef<ChatMessage[]>([]);
+   148→  const abortRef = useRef<AbortController | null>(null);
+   149→
+   150→  // playback machinery shared by voice + text modes
+   151→  const ctxRef = useRef<AudioContext | null>(null);
+   152→  const sourceRef = useRef<AudioBufferSourceNode | null>(null);
+   153→  const playbackAnalyserRef = useRef<AnalyserNode | null>(null);
+   154→  const playbackDataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+   155→  const fallbackRef = useRef<HTMLAudioElement | null>(null);
+   156→  const syntheticUntilRef = useRef(0);
+   157→
+   158→  const onNeedSettingsRef = useRef(onNeedSettings);
+   159→  useEffect(() => {
+   160→    onNeedSettingsRef.current = onNeedSettings;
+   161→  }, [onNeedSettings]);
+   162→
+   163→  /**
+   164→   * CRITICAL: state ref must update in the SAME tick as React state,
+   165→   * so guards in callbacks (onended / onend / beginListening) see the
+   166→   * fresh value immediately. Updating the ref only in an effect caused
+   167→   * the "never listens again after first reply" bug.
+   168→   */
+   169→  const setAgentState = useCallback((s: AgentState) => {
+   170→    stateRef.current = s;
+   171→    setState(s);
+   172→  }, []);
+   173→
+   174→  /* ---------------------------- teardown ---------------------------- */
+   175→
+   176→  const teardownVoice = useCallback(() => {
+   177→    const sess = sessionRef.current;
+   178→    if (!sess) return;
+   179→    sess.stopped = true;
+   180→    if (sess.debounce) clearTimeout(sess.debounce);
+   181→    if (sess.interimTimer) clearTimeout(sess.interimTimer);
+   182→    try {
+   183→      sess.rec?.abort();
+   184→    } catch {
+   185→      /* already stopped */
+   186→    }
+   187→    sess.micStream?.getTracks().forEach((t) => t.stop());
+   188→    sess.micAnalyser = null;
+   189→    sess.micData = null;
+   190→    sess.rec = null;
+   191→    sessionRef.current = null;
+   192→  }, []);
+   193→
+   194→  const stop = useCallback(() => {
+   195→    abortRef.current?.abort();
+   196→    teardownVoice();
+   197→    try {
+   198→      sourceRef.current?.stop();
+   199→    } catch {
+   200→      /* already stopped */
+   201→    }
+   202→    sourceRef.current = null;
+   203→    playbackAnalyserRef.current = null;
+   204→    const fb = fallbackRef.current;
+   205→    if (fb) {
+   206→      fb.pause();
+   207→      fb.removeAttribute("src");
+   208→      fallbackRef.current = null;
+   209→    }
+   210→    syntheticUntilRef.current = 0;
+   211→    activeRef.current = false;
+   212→    modeRef.current = null;
+   213→    setSessionActive(false);
+   214→    setMode(null);
+   215→    setAgentState("idle");
+   216→    setInterim("");
+   217→    setTranscript([]);
+   218→    historyRef.current = [];
+   219→  }, [setAgentState, teardownVoice]);
+   220→
+   221→  const stopRef = useRef(stop);
+   222→  useEffect(() => {
+   223→    stopRef.current = stop;
+   224→  }, [stop]);
+   225→
+   226→  /** Kill the voice half but keep the conversation alive in text mode. */
+   227→  const fallbackToText = useCallback(
+   228→    (reason: string) => {
+   229→      teardownVoice();
+   230→      setMicBlocked(true);
+   231→      setError(reason);
+   232→      if (!activeRef.current) {
+   233→        activeRef.current = true;
+   234→        setSessionActive(true);
+   235→        setLastUser("");
+   236→        setLastReply("");
+   237→        historyRef.current = [];
+   238→      }
+   239→      modeRef.current = "text";
+   240→      setMode("text");
+   241→      setAgentState("idle");
+   242→      setInterim("");
+   243→    },
+   244→    [setAgentState, teardownVoice]
+   245→  );
+   246→
+   247→  /* ------------------------- recognition ---------------------------- */
+   248→
+   249→  const beginListeningRef = useRef<(s: VoiceSession) => void>(() => {});
+   250→  const beginListening = useCallback((sess: VoiceSession) => {
+   251→    if (sess.stopped || !activeRef.current) return;
+   252→    if (stateRef.current !== "listening" || modeRef.current !== "voice") return;
+   253→    const now = performance.now();
+   254→    if (now - sess.lastRestart < 350) {
+   255→      window.setTimeout(() => beginListeningRef.current(sess), 400);
+   256→      return;
+   257→    }
+   258→    sess.lastRestart = now;
+   259→    try {
+   260→      sess.rec?.start();
+   261→    } catch {
+   262→      /* InvalidStateError: already running — onend will handle restart */
+   263→    }
+   264→  }, []);
+   265→  useEffect(() => {
+   266→    beginListeningRef.current = beginListening;
+   267→  }, [beginListening]);
+   268→
+   269→  /* ----------------------------- chat ------------------------------- */
+   270→
+   271→  const askChat = useCallback(async (userText: string): Promise<string> => {
+   272→    const s = useInfinity.getState().settings;
+   273→    const history = [...historyRef.current, { role: "user" as const, content: userText }];
+   274→    const ac = new AbortController();
+   275→    abortRef.current?.abort();
+   276→    abortRef.current = ac;
+   277→    try {
+   278→      const res = await fetch("/api/chat", {
+   279→        method: "POST",
+   280→        headers: { "Content-Type": "application/json" },
+   281→        signal: ac.signal,
+   282→        body: JSON.stringify({
+   283→          provider: s.provider,
+   284→          apiKey: s.apiKey.trim(),
+   285→          baseUrl: s.baseUrl.trim() || undefined,
+   286→          model: s.model.trim(),
+   287→          messages: history.slice(-16),
+   288→          systemPrompt: s.systemPrompt.trim() || undefined,
+   289→        }),
+   290→      });
+   291→      const data = await safeJson<{ ok: true; reply: string } | { ok: false; error: string }>(res);
+   292→      if (!res.ok || !data || !data.ok) {
+   293→        throw new Error(
+   294→          data && !data.ok ? data.error : `The AI service failed (${res.status}).`
+   295→        );
+   296→      }
+   297→      historyRef.current = [...history, { role: "assistant" as const, content: data.reply }].slice(
+   298→        -17
+   299→      );
+   300→      return data.reply;
+   301→    } catch (err) {
+   302→      if (ac.signal.aborted) throw new DOMException("Aborted", "AbortError");
+   303→      if (err instanceof TypeError) {
+   304→        throw new Error("Could not reach the chat service. Check your connection.");
+   305→      }
+   306→      throw err;
+   307→    }
+   308→  }, []);
+   309→
+   310→  /* ----------------------------- speak ------------------------------ */
+   311→
+   312→  const speak = useCallback(
+   313→    async (text: string): Promise<void> => {
+   314→      setAgentState("speaking");
+   315→      const s = useInfinity.getState().settings;
+   316→      const ac = abortRef.current;
+   317→      let buf: ArrayBuffer;
+   318→      try {
+   319→        const res = await fetch("/api/tts", {
+   320→          method: "POST",
+   321→          headers: { "Content-Type": "application/json" },
+   322→          signal: ac?.signal,
+   323→          body: JSON.stringify({ text, voice: s.voice, rate: s.rate }),
+   324→        });
+   325→        if (!res.ok) {
+   326→          const j = (await res.json().catch(() => null)) as { error?: string } | null;
+   327→          throw new Error(j?.error || "Voice synthesis failed.");
+   328→        }
+   329→        buf = await res.arrayBuffer();
+   330→      } catch (err) {
+   331→        if (ac?.signal.aborted) throw new DOMException("Aborted", "AbortError");
+   332→        if (err instanceof TypeError) throw new Error("Could not reach the voice service.");
+   333→        throw err;
+   334→      }
+   335→
+   336→      let ctx = ctxRef.current;
+   337→      if (!ctx) {
+   338→        ctx = new AudioContext();
+   339→        ctxRef.current = ctx;
+   340→      }
+   341→      try {
+   342→        await ctx.resume();
+   343→      } catch {
+   344→        /* will fall back to <audio> if blocked */
+   345→      }
+   346→      const ctx2 = ctx;
+   347→
+   348→      const playBuffer = () =>
+   349→        new Promise<void>((resolve, reject) => {
+   350→          let settled = false;
+   351→          let watchdog = 0;
+   352→          const finish = () => {
+   353→            if (settled) return;
+   354→            settled = true;
+   355→            if (watchdog) window.clearTimeout(watchdog);
+   356→            sourceRef.current = null;
+   357→            playbackAnalyserRef.current = null;
+   358→            resolve();
+   359→          };
+   360→          void (async () => {
+   361→            try {
+   362→              const audio = await ctx2.decodeAudioData(buf);
+   363→              const src = ctx2.createBufferSource();
+   364→              src.buffer = audio;
+   365→              const an = ctx2.createAnalyser();
+   366→              an.fftSize = 512;
+   367→              src.connect(an);
+   368→              an.connect(ctx2.destination);
+   369→              sourceRef.current = src;
+   370→              playbackAnalyserRef.current = an;
+   371→              playbackDataRef.current = new Uint8Array(new ArrayBuffer(an.fftSize));
+   372→              src.onended = finish;
+   373→              watchdog = window.setTimeout(
+   374→                finish,
+   375→                Math.max(1500, (audio.duration || 2) * 1000 + 1200)
+   376→              );
+   377→              src.start();
+   378→            } catch (e) {
+   379→              finish();
+   380→              reject(e instanceof Error ? e : new Error("Audio decoding failed."));
+   381→            }
+   382→          })();
+   383→        });
+   384→
+   385→      const playFallback = () =>
+   386→        new Promise<void>((resolve) => {
+   387→          const url = URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
+   388→          const el = new Audio(url);
+   389→          fallbackRef.current = el;
+   390→          syntheticUntilRef.current = Number.MAX_SAFE_INTEGER;
+   391→          let settled = false;
+   392→          let watchdog = 0;
+   393→          const finish = () => {
+   394→            if (settled) return;
+   395→            settled = true;
+   396→            if (watchdog) window.clearTimeout(watchdog);
+   397→            URL.revokeObjectURL(url);
+   398→            fallbackRef.current = null;
+   399→            syntheticUntilRef.current = 0;
+   400→            resolve();
+   401→          };
+   402→          watchdog = window.setTimeout(finish, 60000);
+   403→          el.onended = finish;
+   404→          el.onerror = finish;
+   405→          void el.play().catch(() => {
+   406→            // Autoplay blocked — end the turn so the loop still continues.
+   407→            finish();
+   408→          });
+   409→        });
+   410→
+   411→      await playBuffer().catch(() => playFallback());
+   412→    },
+   413→    [setAgentState]
+   414→  );
+   415→
+   416→  /* ------------------- respond / transcript ------------------------ */
+   417→
+   418→  /** Append a line to the visible conversation log. */
+   419→  const pushTranscript = useCallback((role: "user" | "infinity", text: string) => {
+   420→    const id = ++transcriptIdRef.current;
+   421→    setTranscript((prev) => {
+   422→      const next = [...prev, { id, role, text }];
+   423→      return next.length > 40 ? next.slice(-40) : next;
+   424→    });
+   425→  }, []);
+   426→
+   427→  /** Infinity's side of the conversation: SPOKEN in voice mode, shown as
+   428→   *  silent text in typing mode — a typed session never plays any sound. */
+   429→  const respond = useCallback(
+   430→    async (text: string): Promise<void> => {
+   431→      if (modeRef.current === "voice") {
+   432→        await speak(text);
+   433→        return;
+   434→      }
+   435→      setLastReply(text);
+   436→      pushTranscript("infinity", text);
+   437→    },
+   438→    [pushTranscript, speak]
+   439→  );
+   440→
+   441→  /** The user's side: caption line + transcript entry (both modes log; only
+   442→   *  typing mode displays the transcript). */
+   443→  const noteUser = useCallback(
+   444→    (text: string) => {
+   445→      setLastUser(text);
+   446→      pushTranscript("user", text);
+   447→    },
+   448→    [pushTranscript]
+   449→  );
+   450→
+   451→  /* -------------------------- workbench ----------------------------- */
+   452→
+   453→  /** Execute a workbench command: toggle the grid, confirm out loud,
+   454→   *  then resume the conversation loop (never hits the LLM). */
+   455→  const applyWorkbench = useCallback(
+   456→    async (action: WorkbenchAction) => {
+   457→      const opening = action === "open";
+   458→      useInfinity.getState().setWorkbench(opening);
+   459→
+   460→      // Stop recognition first so Infinity never hears its own confirmation.
+   461→      const sess = sessionRef.current;
+   462→      if (sess) {
+   463→        try {
+   464→          sess.rec?.stop();
+   465→        } catch {
+   466→          /* noop */
+   467→        }
+   468→        if (sess.debounce) clearTimeout(sess.debounce);
+   469→        if (sess.interimTimer) clearTimeout(sess.interimTimer);
+   470→        sess.finalBuf = "";
+   471→        sess.lastInterim = "";
+   472→      }
+   473→
+   474→      if (activeRef.current) {
+   475→        const confirmText = opening ? "Workbench online." : "Workbench closed.";
+   476→        setLastReply(confirmText);
+   477→        try {
+   478→          await respond(confirmText);
+   479→        } catch {
+   480→          /* confirmation is best-effort */
+   481→        }
+   482→        if (!activeRef.current) return;
+   483→        const s2 = sessionRef.current;
+   484→        if (s2 && !s2.stopped) {
+   485→          window.setTimeout(() => {
+   486→            const s3 = sessionRef.current;
+   487→            if (s3 === s2 && !s3.stopped && activeRef.current) {
+   488→              setAgentState("listening");
+   489→              beginListeningRef.current(s3);
+   490→            }
+   491→          }, 300);
+   492→        } else {
+   493→          setAgentState("idle");
+   494→        }
+   495→      }
+   496→    },
+   497→    [respond, setAgentState]
+   498→  );
+   499→
+   500→  /** Returns true when the text was a workbench command (already handled). */
+   501→  const tryWorkbench = useCallback(
+   502→    (raw: string): boolean => {
+   503→      const action = matchWorkbenchCommand(raw);
+   504→      if (!action) return false;
+   505→      setInterim("");
+   506→      noteUser(raw.trim());
+   507→      setError(null);
+   508→      void applyWorkbench(action);
+   509→      return true;
+   510→    },
+   511→    [applyWorkbench, noteUser]
+   512→  );
+   513→
+   514→  /** Pause mic + clear buffers so Infinity never hears its own voice. */
+   515→  const pauseMic = useCallback(() => {
+   516→    const sess = sessionRef.current;
+   517→    if (!sess) return;
+   518→    try {
+   519→      sess.rec?.stop();
+   520→    } catch {
+   521→      /* noop */
+   522→    }
+   523→    if (sess.debounce) clearTimeout(sess.debounce);
+   524→    if (sess.interimTimer) clearTimeout(sess.interimTimer);
+   525→    sess.finalBuf = "";
+   526→    sess.lastInterim = "";
+   527→    setInterim("");
+   528→  }, []);
+   529→
+   530→  /** Back to listening (voice) or idle (text) after a workbench action. */
+   531→  const resumeAfterAction = useCallback(() => {
+   532→    if (!activeRef.current) return;
+   533→    const sess = sessionRef.current;
+   534→    if (sess && !sess.stopped) {
+   535→      window.setTimeout(() => {
+   536→        const s3 = sessionRef.current;
+   537→        if (s3 === sess && !s3.stopped && activeRef.current) {
+   538→          setAgentState("listening");
+   539→          beginListeningRef.current(s3);
+   540→        }
+   541→      }, 300);
+   542→    } else {
+   543→      setAgentState("idle");
+   544→    }
+   545→  }, [setAgentState]);
+   546→
+   547→  /* --------------------- build & delete models --------------------- */
+   548→
+   549→  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+   550→
+   551→  /** Intercept "build a model of X" — LOCAL builders first (instant, offline,
+   552→   *  keyless); the user's AI only designs objects the local system doesn't
+   553→   *  know (or when explicitly asked to design/invent). A model always spawns.
+   554→   *  Speaks, shows progress, persists. */
+   555→  const tryBuild = useCallback(
+   556→    (raw: string): boolean => {
+   557→      const cmd = matchBuildCommand(raw, useInfinity.getState().workbench);
+   558→      if (!cmd) return false;
+   559→
+   560→      setInterim("");
+   561→      noteUser(raw.trim());
+   562→      setError(null);
+   563→
+   564→      const models = useInfinity.getState().models;
+   565→      if (models.length >= MAX_MODELS) {
+   566→        toast.error("The workbench is full — delete a model first.");
+   567→        return true;
+   568→      }
+   569→
+   570→      useInfinity.getState().setWorkbench(true);
+   571→      pauseMic();
+   572→
+   573→      void (async () => {
+   574→        const settings = useInfinity.getState().settings;
+   575→        const keyReady = isConfigured(settings);
+   576→
+   577→        // 1) LOCAL FIRST — phrases → library → families. Instant, offline,
+   578→        //    deterministic. Skipped only when the user explicitly asks the
+   579→        //    AI to design it AND a key is configured.
+   580→        let spec: HoloSpec | null = null;
+   581→        if (!cmd.forceDesign || !keyReady) {
+   582→          spec =
+   583→            matchPhraseModel(cmd.object) ??
+   584→            matchLibraryModel(cmd.object) ??
+   585→            matchFamilyModel(cmd.object);
+   586→        }
+   587→
+   588→        // 2) Cached AI designs — an object the locals DON'T know, asked for
+   589→        //    before: identical model, instantly, zero API calls.
+   590→        if (!spec) spec = cacheGetSpec(cmd.object);
+   591→
+   592→        let designed = false;
+   593→        let salvagedDesign = false;
+   594→        let designFailed = false;
+   595→        const willDesign = !spec && keyReady;
+   596→
+   597→        const spoken = respond(willDesign ? "OK, designing that now." : "OK, building that now.").catch(
+   598→          () => {
+   599→            /* best effort */
+   600→          }
+   601→        );
+   602→
+   603→        // 3) AI design — the user's LLM invents the object from scratch.
+   604→        //    Only reached for objects the local builders don't recognize
+   605→        //    (or when explicitly forced with "design a …"). The model card
+   606→        //    spawns IMMEDIATELY and fills in part-by-part as the design
+   607→        //    streams — you watch the object being invented, live.
+   608→        let liveId: string | null = null;
+   609→        if (willDesign) {
+   610→          const startName = cmd.object
+   611→            .split(/\s+/)
+   612→            .slice(0, 3)
+   613→            .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+   614→            .join(" ");
+   615→          const spawnStore = useInfinity.getState();
+   616→          const cardId = `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+   617→          liveId = cardId;
+   618→          spawnStore.addModel({
+   619→            id: cardId,
+   620→            name: startName,
+   621→            spec: { name: startName, parts: [] },
+   622→            pos: nextSlot(spawnStore.models.length),
+   623→            rot: { x: 0.12, y: -0.55 },
+   624→            bornAt: Date.now(),
+   625→            pending: true,
+   626→          });
+   627→
+   628→          setBuilding({
+   629→            name: cmd.object,
+   630→            phase: "building",
+   631→            progress: 0.06,
+   632→            partsDone: 0,
+   633→            count: null,
+   634→            note: "DESIGNING",
+   635→          });
+   636→          // Gentle crawl while the model thinks (caps at 30%).
+   637→          const crawl = window.setInterval(() => {
+   638→            setBuilding((b) =>
+   639→              b && b.note ? { ...b, progress: Math.min(0.3, b.progress + 0.005) } : b
+   640→            );
+   641→          }, 500);
+   642→          try {
+   643→            const out = await designHoloSpec({
+   644→              object: cmd.object,
+   645→              provider: settings.provider,
+   646→              apiKey: settings.apiKey,
+   647→              baseUrl: settings.baseUrl,
+   648→              model: settings.model,
+   649→              onProgress: (p) =>
+   650→                setBuilding((b) =>
+   651→                  b
+   652→                    ? {
+   653→                        ...b,
+   654→                        note: p.phase === "thinking" ? "DESIGNING" : `${p.partsDesigned} PARTS`,
+   655→                        progress: Math.max(b.progress, Math.min(0.45, p.progress)),
+   656→                      }
+   657→                    : b
+   658→                ),
+   659→              onPart: (_part, soFar) => {
+   660→                // Progressive assembly: every parsed line becomes a visible
+   661→                // part immediately (re-normalized so the hologram stays
+   662→                // centered and sized while it grows).
+   663→                const partial = normalizeHoloSpec(startName, soFar);
+   664→                useInfinity.getState().updateModel(cardId, { spec: partial });
+   665→                setBuilding((b) =>
+   666→                  b
+   667→                    ? {
+   668→                        ...b,
+   669→                        note: `${soFar.length} PARTS`,
+   670→                        progress: Math.min(0.82, 0.1 + soFar.length * 0.06),
+   671→                      }
+   672→                    : b
+   673→                );
+   674→              },
+   675→            });
+   676→            if (out?.spec) {
+   677→              spec = out.spec;
+   678→              designed = true;
+   679→              salvagedDesign = out.salvaged;
+   680→              if (!out.salvaged) cachePutSpec(cmd.object, out.spec);
+   681→            }
+   682→          } catch {
+   683→            /* fall through to local builders */
+   684→          } finally {
+   685→            window.clearInterval(crawl);
+   686→          }
+   687→          if (!spec) designFailed = true;
+   688→          // A salvaged partial design stays on screen (already visible);
+   689→          // on hard failure the card is repurposed by the fallback below.
+   690→        }
+   691→
+   692→        // 4) Abstract archetypes guarantee a model — no key, no network,
+   693→        //    nothing recognized: still spawns a seeded hologram.
+   694→        if (!spec) {
+   695→          spec = generateModel(cmd.object);
+   696→        }
+   697→
+   698→        const finalSpec = spec;
+   699→        const progressive = liveId !== null;
+   700→        const from = designed ? 0.82 : 0.08;
+   701→
+   702→        setBuilding({
+   703→          name: finalSpec.name,
+   704→          phase: "building",
+   705→          progress: from,
+   706→          partsDone: progressive ? finalSpec.parts.length : 0,
+   707→          count: finalSpec.parts.length,
+   708→        });
+   709→
+   710→        if (progressive && liveId) {
+   711→          // The live card adopts the final spec (exact name + geometry).
+   712→          // Salvaged partials (stream died mid-design) stay session-only:
+   713→          // never persisted, never cached — a reload must not resurrect a
+   714→          // half-designed hologram. Complete designs persist normally.
+   715→          useInfinity.getState().updateModel(liveId, {
+   716→            spec: finalSpec,
+   717→            name: finalSpec.name,
+   718→            pending: salvagedDesign || undefined,
+   719→          });
+   720→        } else if (!progressive) {
+   721→          const store = useInfinity.getState();
+   722→          store.addModel({
+   723→            id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+   724→            name: finalSpec.name,
+   725→            spec: finalSpec,
+   726→            pos: nextSlot(store.models.length),
+   727→            rot: { x: 0.12, y: -0.55 },
+   728→            bornAt: Date.now(),
+   729→          });
+   730→        }
+   731→
+   732→        // Progress tracks the actual on-screen part-by-part assembly.
+   733→        const t0 = performance.now();
+   734→        const iv = window.setInterval(() => {
+   735→          // Assembly starts once the card's spawn animation has settled
+   736→          // (the 3D canvas mounts then — see SPAWN_SETTLE_MS).
+   737→          const frac = Math.min(
+   738→            1,
+   739→            Math.max(0, (performance.now() - t0 - SPAWN_SETTLE_MS) / ASSEMBLE_MS)
+   740→          );
+   741→          setBuilding((b) =>
+   742→            b
+   743→              ? {
+   744→                  ...b,
+   745→                  progress: from + (1 - from) * frac,
+   746→                  partsDone: progressive
+   747→                    ? finalSpec.parts.length
+   748→                    : Math.round(frac * finalSpec.parts.length),
+   749→                }
+   750→              : b
+   751→          );
+   752→          if (frac >= 1) window.clearInterval(iv);
+   753→        }, 90);
+   754→
+   755→        await spoken;
+   756→        if (!activeRef.current && !sessionRef.current) {
+   757→          setAgentState("idle");
+   758→        }
+   759→        await sleep(
+   760→          Math.max(0, SPAWN_SETTLE_MS + ASSEMBLE_MS + 400 - (performance.now() - t0))
+   761→        );
+   762→        window.clearInterval(iv);
+   763→
+   764→        setBuilding((b) => (b ? { ...b, phase: "done", progress: 1 } : b));
+   765→        await sleep(650);
+   766→        setBuilding(null);
+   767→        try {
+   768→          await respond(`${finalSpec.name} ready.`);
+   769→        } catch {
+   770→          /* best effort */
+   771→        }
+   772→        if (designed) {
+   773→          toast.success(`${finalSpec.name} — designed by AI`);
+   774→        } else if (designFailed) {
+   775→          toast("AI design unavailable — built a local model instead");
+   776→        }
+   777→        resumeAfterAction();
+   778→      })().catch((err) => {
+   779→        // Unreachable in practice — local geometry + speech can't fail.
+   780→        // Keep it quiet and visible instead of ever saying "couldn't build".
+   781→        console.error("build failed", err);
+   782→        setBuilding(null);
+   783→        toast.error("Something went wrong showing that model.");
+   784→        resumeAfterAction();
+   785→      });
+   786→      return true;
+   787→    },
+   788→    [noteUser, pauseMic, respond, resumeAfterAction, setAgentState]
+   789→  );
+   790→
+   791→  /** Intercept "delete the X" / "clear the workbench" while in workbench. */
+   792→  const tryDelete = useCallback(
+   793→    (raw: string): boolean => {
+   794→      const store = useInfinity.getState();
+   795→      if (!store.workbench || store.models.length === 0) return false;
+   796→      const cmd = matchDeleteCommand(
+   797→        raw,
+   798→        store.models.map((m) => m.name)
+   799→      );
+   800→      if (!cmd) return false;
+   801→
+   802→      setInterim("");
+   803→      noteUser(raw.trim());
+   804→      setError(null);
+   805→      pauseMic();
+   806→
+   807→      if ("all" in cmd) {
+   808→        const names = store.models.map((m) => m.name);
+   809→        store.clearModels();
+   810→        void (async () => {
+   811→          try {
+   812→            await respond(
+   813→              names.length === 1
+   814→                ? `Removed the ${names[0]}.`
+   815→                : `Cleared ${names.length} models from the workbench.`
+   816→            );
+   817→          } catch {
+   818→            /* best effort */
+   819→          }
+   820→          resumeAfterAction();
+   821→        })();
+   822→        return true;
+   823→      }
+   824→
+   825→      const target = store.models.find(
+   826→        (m) => m.name.toLowerCase() === cmd.name.toLowerCase()
+   827→      ) ?? store.models.find((m) => m.name.toLowerCase().includes(cmd.name.toLowerCase()));
+   828→      if (!target) return false; // mentioned nothing we have → normal chat
+   829→      store.removeModel(target.id);
+   830→      void (async () => {
+   831→        try {
+   832→          await respond(`Removed the ${target.name}.`);
+   833→        } catch {
+   834→          /* best effort */
+   835→        }
+   836→        resumeAfterAction();
+   837→      })();
+   838→      return true;
+   839→    },
+   840→    [noteUser, pauseMic, respond, resumeAfterAction]
+   841→  );
+   842→
+   843→  /* ---------------------------- one turn ---------------------------- */
+   844→
+   845→  const runTurn = useCallback(
+   846→    async (userText: string) => {
+   847→      if (stateRef.current === "thinking" || stateRef.current === "speaking") return;
+   848→      if (tryWorkbench(userText)) return;
+   849→      if (tryDelete(userText)) return;
+   850→      if (tryBuild(userText)) return;
+   851→      setError(null);
+   852→      noteUser(userText);
+   853→      setInterim("");
+   854→      setAgentState("thinking");
+   855→
+   856→      const sessNow = sessionRef.current;
+   857→      if (sessNow?.rec) {
+   858→        try {
+   859→          sessNow.rec.stop();
+   860→        } catch {
+   861→          /* noop */
+   862→        }
+   863→      }
+   864→
+   865→      let reply = "";
+   866→      try {
+   867→        reply = await askChat(userText);
+   868→      } catch (err) {
+   869→        if (!activeRef.current || abortRef.current?.signal.aborted) return;
+   870→        const msg =
+   871→          err instanceof Error && err.message ? err.message : "The AI service failed.";
+   872→        setError(msg);
+   873→        toast.error(msg, {
+   874→          action: { label: "Settings", onClick: () => onNeedSettingsRef.current() },
+   875→        });
+   876→        const s2 = sessionRef.current;
+   877→        if (s2 && !s2.stopped) {
+   878→          setAgentState("listening");
+   879→          beginListeningRef.current(s2);
+   880→        } else {
+   881→          setAgentState("idle");
+   882→        }
+   883→        return;
+   884→      }
+   885→
+   886→      if (!activeRef.current) return;
+   887→      setLastReply(reply);
+   888→
+   889→      try {
+   890→        await respond(reply);
+   891→      } catch (err) {
+   892→        if (!activeRef.current || abortRef.current?.signal.aborted) return;
+   893→        const msg = err instanceof Error && err.message ? err.message : "Voice playback failed.";
+   894→        setError(msg);
+   895→        toast.error(msg);
+   896→      }
+   897→      if (!activeRef.current) return;
+   898→
+   899→      // Resume: voice sessions go back to listening; text sessions wait for input.
+   900→      const sess = sessionRef.current;
+   901→      if (sess && !sess.stopped) {
+   902→        const delay = window.setTimeout(() => {
+   903→          const s3 = sessionRef.current;
+   904→          if (s3 === sess && !s3.stopped && activeRef.current) {
+   905→            setAgentState("listening");
+   906→            beginListeningRef.current(s3);
+   907→          }
+   908→        }, 350);
+   909→        void delay;
+   910→      } else {
+   911→        setAgentState("idle");
+   912→      }
+   913→    },
+   914→    [askChat, noteUser, respond, setAgentState, tryBuild, tryDelete, tryWorkbench]
+   915→  );
+   916→
+   917→  /* --------------------- recognition wiring ------------------------- */
+   918→
+   919→  const setupRecognition = useCallback(
+   920→    (mySess: VoiceSession) => {
+   921→      const rec = new mySess.recCtor();
+   922→      rec.continuous = true;
+   923→      rec.interimResults = true;
+   924→      rec.lang = "en-US";
+   925→
+   926→      const submitVoice = (text: string) => {
+   927→        const t = text.trim();
+   928→        if (!t) return;
+   929→        if (mySess.interimTimer) {
+   930→          clearTimeout(mySess.interimTimer);
+   931→          mySess.interimTimer = null;
+   932→        }
+   933→        if (mySess.debounce) {
+   934→          clearTimeout(mySess.debounce);
+   935→          mySess.debounce = null;
+   936→        }
+   937→        mySess.finalBuf = "";
+   938→        mySess.lastInterim = "";
+   939→        setInterim("");
+   940→        try {
+   941→          mySess.rec?.stop();
+   942→        } catch {
+   943→          /* noop */
+   944→        }
+   945→        void runTurn(t);
+   946→      };
+   947→
+   948→      rec.onresult = (event) => {
+   949→        if (sessionRef.current !== mySess || mySess.stopped) return;
+   950→        if (stateRef.current !== "listening") return;
+   951→        let interimText = "";
+   952→        for (let i = event.resultIndex; i < event.results.length; i++) {
+   953→          const r = event.results[i];
+   954→          if (r.isFinal) mySess.finalBuf += r[0].transcript + " ";
+   955→          else interimText += r[0].transcript;
+   956→        }
+   957→        if (interimText) setInterim(interimText);
+   958→        if (mySess.interimTimer) {
+   959→          clearTimeout(mySess.interimTimer);
+   960→          mySess.interimTimer = null;
+   961→        }
+   962→        mySess.lastInterim = interimText;
+   963→
+   964→        if (mySess.finalBuf.trim()) {
+   965→          if (mySess.debounce) clearTimeout(mySess.debounce);
+   966→          // Small pause after final words → send.
+   967→          mySess.debounce = setTimeout(() => submitVoice(mySess.finalBuf), 850);
+   968→        } else if (interimText.trim()) {
+   969→          // Safety net: some browsers stall before emitting a final result.
+   970→          mySess.interimTimer = setTimeout(
+   971→            () => submitVoice(mySess.lastInterim),
+   972→            1700
+   973→          );
+   974→        }
+   975→      };
+   976→
+   977→      rec.onerror = (event) => {
+   978→        if (sessionRef.current !== mySess || mySess.stopped) return;
+   979→        const kind = event.error;
+   980→        if (kind === "no-speech" || kind === "aborted") return;
+   981→        if (kind === "not-allowed" || kind === "service-not-allowed") {
+   982→          fallbackToText(
+   983→            "Microphone access was blocked — open this app in its own browser tab to talk out loud, or type below."
+   984→          );
+   985→          return;
+   986→        }
+   987→        if (kind === "network") {
+   988→          fallbackToText(
+   989→            "Speech recognition lost its connection — keep talking by typing below."
+   990→          );
+   991→        }
+   992→      };
+   993→
+   994→      rec.onend = () => {
+   995→        if (sessionRef.current !== mySess || mySess.stopped) return;
+   996→        if (stateRef.current === "listening" && modeRef.current === "voice") {
+   997→          beginListeningRef.current(mySess);
+   998→        }
+   999→      };
+  1000→
+  1001→      mySess.rec = rec;
+  1002→    },
+  1003→    [fallbackToText, runTurn]
+  1004→  );
+  1005→
+  1006→  /* ------------------------------ start ----------------------------- */
+  1007→
+  1008→  const start = useCallback(() => {
+  1009→    if (activeRef.current) return;
+  1010→    const s = useInfinity.getState().settings;
+  1011→    if (!isConfigured(s)) {
+  1012→      toast("Add your API key in Settings to start talking to Infinity.", {
+  1013→        action: { label: "Settings", onClick: () => onNeedSettingsRef.current() },
+  1014→      });
+  1015→      onNeedSettingsRef.current();
+  1016→      return;
+  1017→    }
+  1018→    const recCtor = getSpeechRecognitionCtor();
+  1019→    if (!recCtor) {
+  1020→      toast("Voice input isn't supported in this browser — type instead (press /).");
+  1021→      fallbackToText(
+  1022→        "Voice input isn't supported in this browser — type below and Infinity will answer out loud."
+  1023→      );
+  1024→      return;
+  1025→    }
+  1026→
+  1027→    const sess: VoiceSession = {
+  1028→      stopped: false,
+  1029→      micStream: null,
+  1030→      micAnalyser: null,
+  1031→      micData: null,
+  1032→      rec: null,
+  1033→      recCtor,
+  1034→      finalBuf: "",
+  1035→      lastInterim: "",
+  1036→      interimTimer: null,
+  1037→      debounce: null,
+  1038→      lastRestart: 0,
+  1039→    };
+  1040→    sessionRef.current = sess;
+  1041→    activeRef.current = true;
+  1042→    modeRef.current = "voice";
+  1043→    setMode("voice");
+  1044→    setSessionActive(true);
+  1045→    setMicBlocked(false);
+  1046→    setError(null);
+  1047→    setLastUser("");
+  1048→    setLastReply("");
+  1049→    historyRef.current = [];
+  1050→
+  1051→    void (async () => {
+  1052→      try {
+  1053→        let ctx = ctxRef.current;
+  1054→        if (!ctx) {
+  1055→          ctx = new AudioContext();
+  1056→          ctxRef.current = ctx;
+  1057→        }
+  1058→        try {
+  1059→          await ctx.resume();
+  1060→        } catch {
+  1061→          /* noop */
+  1062→        }
+  1063→        sess.micStream = await navigator.mediaDevices.getUserMedia({
+  1064→          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  1065→        });
+  1066→        if (sessionRef.current !== sess) {
+  1067→          sess.micStream.getTracks().forEach((t) => t.stop());
+  1068→          return;
+  1069→        }
+  1070→        const micSrc = ctx.createMediaStreamSource(sess.micStream);
+  1071→        const an = ctx.createAnalyser();
+  1072→        an.fftSize = 512;
+  1073→        micSrc.connect(an); // deliberately not connected to destination
+  1074→        sess.micAnalyser = an;
+  1075→        sess.micData = new Uint8Array(new ArrayBuffer(an.fftSize));
+  1076→
+  1077→        setupRecognition(sess);
+  1078→        setAgentState("listening");
+  1079→        beginListening(sess);
+  1080→      } catch {
+  1081→        if (sessionRef.current !== sess) return;
+  1082→        fallbackToText(
+  1083→          "Microphone unavailable — open this app in its own browser tab and allow the mic, or type below."
+  1084→        );
+  1085→        toast.error("Microphone unavailable — you can type instead.");
+  1086→      }
+  1087→    })();
+  1088→  }, [beginListening, fallbackToText, setAgentState, setupRecognition]);
+  1089→
+  1090→  /* ----------------------------- typing ----------------------------- */
+  1091→
+  1092→  const sendText = useCallback(
+  1093→    (text: string) => {
+  1094→      const t = text.trim();
+  1095→      if (!t) return;
+  1096→      // TYPING MODE: sending text always implies a silent text session —
+  1097→      // no mic, no sound, replies appear as text. If a VOICE session is
+  1098→      // already running, the typed text joins it instead (barge-in, spoken).
+  1099→      if (!activeRef.current) {
+  1100→        activeRef.current = true;
+  1101→        modeRef.current = "text";
+  1102→        setMode("text");
+  1103→        setSessionActive(true);
+  1104→        setMicBlocked(false);
+  1105→        setError(null);
+  1106→        setLastUser("");
+  1107→        setLastReply("");
+  1108→        setTranscript([]);
+  1109→        historyRef.current = [];
+  1110→        setAgentState("idle");
+  1111→      }
+  1112→      // Workbench commands are local — they work even without an API key.
+  1113→      if (tryWorkbench(t)) return;
+  1114→      if (tryDelete(t)) return;
+  1115→      if (tryBuild(t)) return;
+  1116→      const s = useInfinity.getState().settings;
+  1117→      if (!isConfigured(s)) {
+  1118→        toast("Add your API key in Settings first.", {
+  1119→          action: { label: "Settings", onClick: () => onNeedSettingsRef.current() },
+  1120→        });
+  1121→        onNeedSettingsRef.current();
+  1122→        return;
+  1123→      }
+  1124→      void runTurn(t);
+  1125→    },
+  1126→    [runTurn, setAgentState, tryBuild, tryDelete, tryWorkbench]
+  1127→  );
+  1128→
+  1129→  const toggle = useCallback(() => {
+  1130→    if (activeRef.current) stop();
+  1131→    else start();
+  1132→  }, [start, stop]);
+  1133→
+  1134→  /* --------------------------- level loop --------------------------- */
+  1135→
+  1136→  useEffect(() => {
+  1137→    let raf = 0;
+  1138→    const frame = (t: number) => {
+  1139→      const st = stateRef.current;
+  1140→      let target = 0;
+  1141→      const sess = sessionRef.current;
+  1142→      if (st === "listening" && sess?.micAnalyser && sess.micData) {
+  1143→        target = rms(sess.micAnalyser, sess.micData);
+  1144→      } else if (st === "speaking") {
+  1145→        if (playbackAnalyserRef.current && playbackDataRef.current) {
+  1146→          target = rms(playbackAnalyserRef.current, playbackDataRef.current);
+  1147→        } else if (syntheticUntilRef.current > Date.now()) {
+  1148→          target = 0.32 + 0.28 * Math.sin(t * 0.012);
+  1149→        }
+  1150→      }
+  1151→      const prev = levelRef.current;
+  1152→      levelRef.current = prev + (target - prev) * (target > prev ? 0.55 : 0.12);
+  1153→      raf = requestAnimationFrame(frame);
+  1154→    };
+  1155→    raf = requestAnimationFrame(frame);
+  1156→    return () => cancelAnimationFrame(raf);
+  1157→  }, []);
+  1158→
+  1159→  // stop everything on unmount
+  1160→  useEffect(() => () => stopRef.current(), []);
+  1161→
+  1162→  return {
+  1163→    state,
+  1164→    mode,
+  1165→    sessionActive,
+  1166→    interim,
+  1167→    lastUser,
+  1168→    lastReply,
+  1169→    error,
+  1170→    micBlocked,
+  1171→    transcript,
+  1172→    building,
+  1173→    levelRef,
+  1174→    start,
+  1175→    stop,
+  1176→    toggle,
+  1177→    sendText,
+  1178→  };
+  1179→}
+  1180→

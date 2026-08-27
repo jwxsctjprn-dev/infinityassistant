@@ -333,7 +333,9 @@ export default function Home() {
           maxLength={500}
           autoComplete="off"
           spellCheck={false}
-          placeholder="Type to Infinity · Enter to send"
+          placeholder={
+            workbench ? "Ask me what's here · or build something" : "Type to Infinity · Enter to send"
+          }
           aria-label="Type a message to Infinity"
           className="w-full max-w-sm rounded-full border border-white/10 bg-white/[0.06] px-5 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500/40 focus:outline-none"
         />

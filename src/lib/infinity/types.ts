@@ -91,9 +91,15 @@ export interface HoloModel {
   spec: HoloSpec;
   pos: { x: number; y: number };
   rot: { x: number; y: number };
+  /** Uniform hologram scale, resized via the corner handle. Default 1. */
+  scale?: number;
   /** Timestamp of creation — fresh models assemble part-by-part on screen. */
   bornAt?: number;
 }
+
+/** Resize handle limits (fraction of the model's natural size). */
+export const HOLO_SCALE_MIN = 0.4;
+export const HOLO_SCALE_MAX = 2.5;
 
 export const DEFAULT_SYSTEM_PROMPT =
   "You are Infinity, a warm, witty voice companion having a natural spoken conversation with the user. " +

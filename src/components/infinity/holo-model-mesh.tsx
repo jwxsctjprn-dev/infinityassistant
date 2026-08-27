@@ -62,11 +62,13 @@ function SpecGroup({
   rot,
   subtle,
   assembleMs,
+  scale = 1,
 }: {
   spec: HoloSpec;
   rot: { x: number; y: number };
   subtle: boolean;
   assembleMs?: number;
+  scale?: number;
 }) {
   const group = useRef<THREE.Group>(null);
   const [visible, setVisible] = useState(assembleMs ? 1 : spec.parts.length);
@@ -92,6 +94,7 @@ function SpecGroup({
     // user rotation + gentle idle bob (doesn't move the locked position)
     group.current.rotation.x = rot.x;
     group.current.rotation.y = rot.y;
+    group.current.scale.setScalar(scale);
     group.current.position.y = subtle ? Math.sin(state.clock.elapsedTime * 0.8) * 0.035 : 0;
   });
   return (
@@ -103,15 +106,25 @@ function SpecGroup({
   );
 }
 
-/** One holographic model inside its own small transparent canvas. */
+/** One holographic model inside its own small transparent canvas.
+ *
+ * The canvas element is oversized to 2× the card (inset -50%) with the
+ * camera pulled back exactly 2× (same fov) — so at scale 1 the hologram
+ * renders pixel-identical to a flush canvas, but resizing up to ~2.5×
+ * never clips at the canvas edge. The overhang is pointer-events:none so
+ * it never blocks the grid or neighbouring models.
+ */
 export function HoloModelMesh({
   spec,
   rot,
+  scale = 1,
   subtleBob = true,
   assembleMs,
 }: {
   spec: HoloSpec;
   rot: { x: number; y: number };
+  /** Uniform hologram scale (corner-handle resize). */
+  scale?: number;
   subtleBob?: boolean;
   /** When set, parts appear one-by-one over this duration (fresh builds). */
   assembleMs?: number;
@@ -120,12 +133,17 @@ export function HoloModelMesh({
     <Canvas
       gl={{ alpha: true, antialias: true }}
       dpr={[1, 1.75]}
-      camera={{ fov: 38, position: [0, 0.7, 4.6] }}
-      style={{ background: "transparent" }}
+      camera={{ fov: 38, position: [0, 1.4, 9.2] }}
+      style={{
+        background: "transparent",
+        position: "absolute",
+        inset: "-50%",
+        pointerEvents: "none",
+      }}
     >
       <ambientLight intensity={0.5} />
       <directionalLight position={[3, 5, 4]} intensity={1.1} color="#bfe3ff" />
-      <SpecGroup spec={spec} rot={rot} subtle={subtleBob} assembleMs={assembleMs} />
+      <SpecGroup spec={spec} rot={rot} subtle={subtleBob} assembleMs={assembleMs} scale={scale} />
     </Canvas>
   );
 }

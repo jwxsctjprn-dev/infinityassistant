@@ -28,7 +28,10 @@ interface InfinityStore {
   addModel: (m: HoloModel) => void;
   removeModel: (id: string) => void;
   clearModels: () => void;
-  updateModel: (id: string, patch: Partial<Pick<HoloModel, "pos" | "rot">>) => void;
+  updateModel: (
+    id: string,
+    patch: Partial<Pick<HoloModel, "pos" | "rot" | "scale">>
+  ) => void;
 }
 
 export const useInfinity = create<InfinityStore>()(

@@ -223,3 +223,19 @@ Work Log:
 
 Stage Summary:
 - ~180 everyday-object words now build accurate, correctly-colored three.js holograms locally; the abstract fallback only fires for genuinely unknown/nonsense asks. "Chair" (and table, pizza, guitar, tv, sun, sofa, bed, tools, food, wear...) verified visually in-browser.
+
+---
+Task ID: 18
+Agent: main (Z.ai Code)
+Task: Hover controls on workbench models — one small L-style corner that drags to resize the hologram, plus a red holographic delete button.
+
+Work Log:
+- types.ts: HoloModel.scale?: number (uniform hologram scale, persisted via existing partialize); exported HOLO_SCALE_MIN=0.4 / HOLO_SCALE_MAX=2.5.
+- settings.ts: updateModel patch type extended to Partial<Pick<HoloModel, "pos" | "rot" | "scale">>.
+- holo-model-mesh.tsx: HoloModelMesh/SpecGroup accept scale (useFrame sets group.scale.setScalar — vector-crisp resize, same pattern as rot). Canvas oversized to 2× the card (position absolute + inset -50% + pointerEvents none) with camera pulled back exactly 2× ([0,1.4,9.2], same fov 38) — scale-1 rendering is pixel-identical to before, but a model scaled to ~2.5× never clips at the canvas edge, and the overhang stays click-through (no dead zones over the grid/neighbouring cards).
+- workbench-models.tsx ModelCard: hovered/resizing state → showHandles; L-CORNER RESIZE HANDLE (bottom-right, 40px hit area, nested double-L SVG in sky-300 with glow, cursor nwse-resize) — pointerdown attaches window pointermove/up listeners (works with real + synthetic pointers, no pointer-capture dependency); scale = startScale × (dist-from-card-center / start-dist), clamped 0.4–2.5, rounded 2 decimals, live % readout chip near the handle while dragging (caught mid-drag: "143%"); handle is role=slider with aria-valuemin/max/now + Arrow keys ±0.1 (Shift ±0.25). RED HOLOGRAPHIC DELETE BUTTON (top-right, translucent red circle + Trash2, red glow, hover intensify, active press) → removeModel; pointerdown stopPropagation so it never starts a card drag. Label shows "NAME · P%" while hovered at non-100% or resizing. Glow under model scales with hologram. Cards wrapped in AnimatePresence: spawn fade/pop-in + delete exit (scale 0.5 + blur dissolve, 280ms). aria-labels updated on card/handle/button.
+- bunx tsc --noEmit: clean (src/). bun run lint: clean. dev.log: all 200s (only /api/tts — building stays 100% local).
+- E2E (agent-browser real mouse + VLM, keyless): built rocket ship → hover card → VLM confirmed BOTH "small light-blue L-shaped corner handle at bottom-right" AND "small red circular button with white trash can icon"; real drag on L corner (mouse move→down→move→up) → scale persisted exactly 2.0 in localStorage, VLM: mid-drag "143%" readout chip visible, final model "close to double size, fully visible without any clipping"; shrink-drag toward center → 0.61; reload + reopen workbench → scale 2.0 restored, label "ROCKET SHIP · 200%", VLM re-verified size/no-clipping/handles; delete button click → 0 cards on screen, 0 models in storage; keyboard focus slider + ArrowUp×2 → scale 1.2 with aria-valuenow=120; fresh chair build at 100% → VLM: "clearly identifiable as a chair… no significant glitches" (camera-compensation caused zero visual regression); zero page errors; storage cleared for fresh first-run.
+
+Stage Summary:
+- Hovering any hologram now reveals a macOS-style L corner (drag to resize 40%–250%, with live % readout, keyboard support, and persisted scale that survives reload) and a red holographic trash button (one click deletes with a dissolve animation). Resizing never clips thanks to the 2× oversized canvas + compensated camera; scale-1 appearance is unchanged.

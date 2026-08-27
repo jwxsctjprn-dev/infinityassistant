@@ -12,7 +12,7 @@ import {
 } from "@/lib/infinity/workbench";
 import { MAX_MODELS, nextSlot } from "@/lib/infinity/holo";
 import { ASSEMBLE_MS, matchLibraryModel } from "@/lib/infinity/holo-library";
-import { generateModel } from "@/lib/infinity/holo-generator";
+import { generateModel, matchPhraseModel } from "@/lib/infinity/holo-generator";
 import type { BuildingState } from "@/components/infinity/workbench-models";
 
 /**
@@ -515,10 +515,11 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         return true;
       }
 
-      // Everything builds LOCALLY with three.js: the hand-authored library
-      // first, then the procedural generator for anything else. No network,
-      // no API key — a model is guaranteed to spawn.
-      const libSpec = matchLibraryModel(cmd.object) ?? generateModel(cmd.object);
+      // Everything builds LOCALLY with three.js: exact multiword phrases
+      // first, then the hand-authored library, then the procedural families.
+      // No network, no API key — a model is guaranteed to spawn.
+      const libSpec =
+        matchPhraseModel(cmd.object) ?? matchLibraryModel(cmd.object) ?? generateModel(cmd.object);
       {
         useInfinity.getState().setWorkbench(true);
         pauseMic();

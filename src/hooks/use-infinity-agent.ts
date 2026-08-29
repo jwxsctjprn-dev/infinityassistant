@@ -2,31 +2,29 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import type { AgentState, ChatMessage } from "@/lib/infinity/types";
+import type { AgentState, ChatMessage, SttResponseBody } from "@/lib/infinity/types";
 import { isConfigured, useInfinity } from "@/lib/infinity/settings";
 import {
+  matchBenchTool,
   matchBuildCommand,
   matchDeleteCommand,
-  matchStressTestCommand,
+  matchModelAction,
   matchWorkbenchCommand,
   type WorkbenchAction,
 } from "@/lib/infinity/workbench";
 import {
   describeWorkbench,
+  hexForColorName,
   matchBenchQuestion,
   summarizeWorkbench,
 } from "@/lib/infinity/workbench-vision";
-import { MAX_MODELS, nextSlot, normalizeHoloSpec, SPAWN_SETTLE_MS } from "@/lib/infinity/holo";
+import { dominantColor, MAX_MODELS, nextSlot, normalizeHoloSpec, SPAWN_SETTLE_MS } from "@/lib/infinity/holo";
+import { HOLO_SPIN_SPEED } from "@/lib/infinity/types";
+import { captureWorkbenchSnapshot } from "@/lib/infinity/snapshot";
 import { ASSEMBLE_MS, matchLibraryModel } from "@/lib/infinity/holo-library";
 import { generateModel, matchFamilyModel, matchPhraseModel } from "@/lib/infinity/holo-generator";
 import { cacheGetSpec, cachePutSpec, designHoloSpec } from "@/lib/infinity/holo-ai";
-import {
-  completeAssignment,
-  parseStressLine,
-  requestStressAnalysis,
-  runStressAnalysis,
-} from "@/lib/infinity/stress";
-import type { HoloModel, HoloPart, HoloSpec } from "@/lib/infinity/types";
+import type { HoloModel, HoloSpec } from "@/lib/infinity/types";
 import type { BuildingState } from "@/components/infinity/workbench-models";
 
 /**
@@ -92,6 +90,47 @@ function rms(analyser: AnalyserNode, data: Uint8Array<ArrayBuffer>): number {
   return Math.min(1, Math.sqrt(sum / data.length) * 3.4);
 }
 
+/** Blob → base64 (no data: URL prefix) via FileReader. */
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const s = String(r.result);
+      resolve(s.slice(s.indexOf(",") + 1));
+    };
+    r.onerror = () => reject(new Error("Could not read the recording."));
+    r.readAsDataURL(blob);
+  });
+}
+
+/** Best audio MIME this browser's MediaRecorder supports (opus webm first). */
+function pickRecorderMime(): string | undefined {
+  if (typeof MediaRecorder === "undefined") return undefined;
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/mp4",
+  ];
+  for (const m of candidates) {
+    try {
+      if (MediaRecorder.isTypeSupported(m)) return m;
+    } catch {
+      /* keep probing */
+    }
+  }
+  return undefined;
+}
+
+/** True when this browser can capture audio for push-to-talk dictation. */
+function supportsDictation(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.MediaRecorder !== "undefined" &&
+    !!navigator.mediaDevices?.getUserMedia
+  );
+}
+
 /* ------------------------------------------------------------------ */
 
 /** Split streamed text into speakable sentences: a terminator (. ! ? …)
@@ -117,6 +156,34 @@ function splitSentences(pending: string): { sentences: string[]; rest: string } 
     }
   }
   return { sentences, rest: pending.slice(start) };
+}
+
+/** Normalize speech text for comparison (echo guard). */
+function normalizeSpeech(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** True when a transcript is Infinity's own spoken voice picked back up by
+ *  the always-on mic (echo), not the user talking: either the whole
+ *  utterance sits inside what was just spoken, or (for 3+ words) most
+ *  words overlap with it. Mis-heard TTS still shares most words — a real
+ *  user interrupting rarely does. */
+function isSpeechEcho(transcript: string, spoken: string): boolean {
+  const nt = normalizeSpeech(transcript);
+  const ns = normalizeSpeech(spoken);
+  if (!nt || !ns) return false;
+  if (ns.includes(nt)) return true;
+  const words = nt.split(" ");
+  if (words.length >= 3) {
+    const sw = new Set(ns.split(" "));
+    const hits = words.filter((w) => sw.has(w)).length;
+    if (hits / words.length >= 0.75) return true;
+  }
+  return false;
 }
 
 /** Push-ended async queue — LLM sentences stream in, the speech pipeline
@@ -151,7 +218,7 @@ function createSentenceQueue() {
   };
 }
 
-export type AgentMode = "voice" | "text";
+export type AgentMode = "voice" | "text" | "dictation";
 
 /** One line of the visible conversation log (typing mode). */
 export interface TranscriptEntry {
@@ -166,12 +233,26 @@ interface VoiceSession {
   micAnalyser: AnalyserNode | null;
   micData: Uint8Array<ArrayBuffer> | null;
   rec: SpeechRecognitionLike | null;
-  recCtor: SpeechRecognitionCtor;
+  recCtor: SpeechRecognitionCtor | null;
   finalBuf: string;
   lastInterim: string;
   interimTimer: ReturnType<typeof setTimeout> | null;
   debounce: ReturnType<typeof setTimeout> | null;
   lastRestart: number;
+  /* Push-to-talk dictation (browsers without the Web Speech API):
+     input is a MediaRecorder clip transcribed by /api/stt instead of
+     continuous on-device recognition. */
+  dictation: boolean;
+  recorder: MediaRecorder | null;
+  recording: boolean;
+  /** performance.now() when the current clip started. */
+  recStart: number;
+  /** True once the mic peaked above the speech threshold this clip. */
+  speechHeard: boolean;
+  /** performance.now() of the last frame above the speech threshold. */
+  lastVoiceAt: number;
+  /** Drop the in-flight clip (e.g. the user typed while recording). */
+  discardNext: boolean;
 }
 
 export interface UseInfinityAgent {
@@ -189,9 +270,15 @@ export interface UseInfinityAgent {
   building: BuildingState | null;
   /** 0..1 smoothed audio loudness for the orb (read imperatively each frame) */
   levelRef: React.MutableRefObject<number>;
+  /** True while the session runs in push-to-talk mode (no Web Speech API). */
+  dictation: boolean;
+  /** True while capturing a dictation clip. */
+  recording: boolean;
   start: () => void;
   stop: () => void;
   toggle: () => void;
+  /** Push-to-talk: begin / end+send a dictation clip. */
+  toggleRecording: () => void;
   sendText: (text: string) => void;
 }
 
@@ -204,6 +291,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
   const [lastReply, setLastReply] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [micBlocked, setMicBlocked] = useState(false);
+  const [recording, setRecording] = useState(false);
   const [building, setBuilding] = useState<BuildingState | null>(null);
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const transcriptIdRef = useRef(0);
@@ -212,6 +300,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
   const stateRef = useRef<AgentState>("idle");
   const modeRef = useRef<AgentMode | null>(null);
   const activeRef = useRef(false);
+  const recordingRef = useRef(false);
   const sessionRef = useRef<VoiceSession | null>(null);
   const historyRef = useRef<ChatMessage[]>([]);
   const abortRef = useRef<AbortController | null>(null);
@@ -223,6 +312,24 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
   const playbackDataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
   const fallbackRef = useRef<HTMLAudioElement | null>(null);
   const syntheticUntilRef = useRef(0);
+
+  /** Everything Infinity has said out loud recently — the ECHO GUARD for the
+   *  always-on mic: recognition results matching this text are Infinity
+   *  hearing its own voice through the speakers, not the user. */
+  const spokenRef = useRef<{ text: string; at: number }>({ text: "", at: 0 });
+  /** The last thing the user submitted by voice — trailing duplicate finals
+   *  for the SAME utterance must never read as a barge-in. */
+  const lastSubmittedRef = useRef<{ text: string; at: number }>({ text: "", at: 0 });
+
+  const noteSpoken = useCallback((text: string) => {
+    const n = normalizeSpeech(text);
+    if (!n) return;
+    const cur = spokenRef.current;
+    spokenRef.current = {
+      text: Date.now() - cur.at < 3000 ? `${cur.text} ${n}`.trim() : n,
+      at: Date.now(),
+    };
+  }, []);
 
   const onNeedSettingsRef = useRef(onNeedSettings);
   useEffect(() => {
@@ -253,6 +360,14 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
     } catch {
       /* already stopped */
     }
+    // A live dictation clip dies with the session (onstop sees stopped=true).
+    try {
+      if (sess.recorder && sess.recorder.state !== "inactive") sess.recorder.stop();
+    } catch {
+      /* already stopped */
+    }
+    sess.recorder = null;
+    sess.recording = false;
     sess.micStream?.getTracks().forEach((t) => t.stop());
     sess.micAnalyser = null;
     sess.micData = null;
@@ -260,9 +375,8 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
     sessionRef.current = null;
   }, []);
 
-  const stop = useCallback(() => {
-    abortRef.current?.abort();
-    teardownVoice();
+  /** Hard-stop any audio playing right now (barge-in / session stop). */
+  const killAudio = useCallback(() => {
     try {
       sourceRef.current?.stop();
     } catch {
@@ -277,6 +391,14 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       fallbackRef.current = null;
     }
     syntheticUntilRef.current = 0;
+  }, []);
+
+  const stop = useCallback(() => {
+    abortRef.current?.abort();
+    teardownVoice();
+    recordingRef.current = false;
+    setRecording(false);
+    killAudio();
     activeRef.current = false;
     modeRef.current = null;
     setSessionActive(false);
@@ -285,7 +407,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
     setInterim("");
     setTranscript([]);
     historyRef.current = [];
-  }, [setAgentState, teardownVoice]);
+  }, [killAudio, setAgentState, teardownVoice]);
 
   const stopRef = useRef(stop);
   useEffect(() => {
@@ -297,6 +419,8 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
     (reason: string) => {
       teardownVoice();
       setMicBlocked(true);
+      recordingRef.current = false;
+      setRecording(false);
       setError(reason);
       if (!activeRef.current) {
         activeRef.current = true;
@@ -316,9 +440,12 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
   /* ------------------------- recognition ---------------------------- */
 
   const beginListeningRef = useRef<(s: VoiceSession) => void>(() => {});
+  /** ALWAYS-ON MIC: recognition is (re)started in ANY active state — it
+   *  keeps running while Infinity thinks and even while it speaks (the
+   *  barge-in channel in onresult listens through the reply). */
   const beginListening = useCallback((sess: VoiceSession) => {
     if (sess.stopped || !activeRef.current) return;
-    if (stateRef.current !== "listening" || modeRef.current !== "voice") return;
+    if (modeRef.current !== "voice") return;
     const now = performance.now();
     if (now - sess.lastRestart < 350) {
       window.setTimeout(() => beginListeningRef.current(sess), 400);
@@ -346,7 +473,8 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
   const askChatStream = useCallback(
     async (
       userText: string,
-      onSentence?: (sentence: string, fullSoFar: string) => void
+      onSentence?: (sentence: string, fullSoFar: string) => void,
+      signal?: AbortSignal
     ): Promise<string> => {
       const s = useInfinity.getState().settings;
       const history = [...historyRef.current, { role: "user" as const, content: userText }];
@@ -358,17 +486,17 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       const wb = useInfinity.getState();
       const outbound = [
         ...history.slice(0, -1),
-        { role: "system" as const, content: describeWorkbench(wb.models, wb.workbench) },
+        {
+          role: "system" as const,
+          content: describeWorkbench(wb.models, wb.workbench, wb.blueprint, wb.focusedId, wb.scenes),
+        },
         history[history.length - 1],
       ];
-      const ac = new AbortController();
-      abortRef.current?.abort();
-      abortRef.current = ac;
       try {
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          signal: ac.signal,
+          signal,
           body: JSON.stringify({
             provider: s.provider,
             apiKey: s.apiKey.trim(),
@@ -427,9 +555,9 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
               for (const sentence of split.sentences) emit(sentence);
               // Long stretch with no punctuation → flush at the last pause so
               // the first audio starts as early as it naturally can.
-              if (pending.length > 260) {
+              if (pending.length > 170) {
                 const cut = Math.max(pending.lastIndexOf(" "), pending.lastIndexOf(","));
-                if (cut > 80) {
+                if (cut > 70) {
                   emit(pending.slice(0, cut + 1));
                   pending = pending.slice(cut + 1);
                 } else {
@@ -452,7 +580,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         );
         return full;
       } catch (err) {
-        if (ac.signal.aborted) throw new DOMException("Aborted", "AbortError");
+        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
         if (err instanceof TypeError) {
           throw new Error("Could not reach the chat service. Check your connection.");
         }
@@ -465,27 +593,30 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
   /* ----------------------------- speak ------------------------------ */
 
   /** Fetch synthesized audio for one text chunk (mp3 bytes). */
-  const fetchTtsAudio = useCallback(async (text: string): Promise<ArrayBuffer> => {
-    const s = useInfinity.getState().settings;
-    const ac = abortRef.current;
-    try {
-      const res = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: ac?.signal,
-        body: JSON.stringify({ text, voice: s.voice, rate: s.rate }),
-      });
-      if (!res.ok) {
-        const j = (await res.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(j?.error || "Voice synthesis failed.");
+  const fetchTtsAudio = useCallback(
+    async (text: string, signal?: AbortSignal): Promise<ArrayBuffer> => {
+      const s = useInfinity.getState().settings;
+      const sig = signal ?? abortRef.current?.signal;
+      try {
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: sig,
+          body: JSON.stringify({ text, voice: s.voice, rate: s.rate }),
+        });
+        if (!res.ok) {
+          const j = (await res.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(j?.error || "Voice synthesis failed.");
+        }
+        return await res.arrayBuffer();
+      } catch (err) {
+        if (sig?.aborted) throw new DOMException("Aborted", "AbortError");
+        if (err instanceof TypeError) throw new Error("Could not reach the voice service.");
+        throw err;
       }
-      return await res.arrayBuffer();
-    } catch (err) {
-      if (ac?.signal.aborted) throw new DOMException("Aborted", "AbortError");
-      if (err instanceof TypeError) throw new Error("Could not reach the voice service.");
-      throw err;
-    }
-  }, []);
+    },
+    []
+  );
 
   /** Decode + play one audio buffer through the shared AudioContext with
    *  the playback analyser (orb reacts), falling back to <audio>. */
@@ -571,10 +702,11 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
   const speak = useCallback(
     async (text: string): Promise<void> => {
       setAgentState("speaking");
+      noteSpoken(text); // echo guard: this is about to come out of the speakers
       const buf = await fetchTtsAudio(text);
       await playAudio(buf);
     },
-    [fetchTtsAudio, playAudio, setAgentState]
+    [fetchTtsAudio, noteSpoken, playAudio, setAgentState]
   );
 
   /**
@@ -585,30 +717,37 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
    * audio actually plays.
    */
   const speakStreamed = useCallback(
-    async (sentences: AsyncIterable<string>): Promise<void> => {
+    async (sentences: AsyncIterable<string>, signal?: AbortSignal): Promise<void> => {
       let firstError: unknown = null;
       let startedSpeaking = false;
       let prev: Promise<void> = Promise.resolve();
-      const aborted = () => abortRef.current?.signal.aborted === true;
+      const aborted = () => signal?.aborted ?? abortRef.current?.signal.aborted === true;
 
       for await (const sentence of sentences) {
         if (aborted() || firstError) break;
+        // SNAPSHOT the previous task BEFORE starting this one. Reading the
+        // outer `prev` inside the async body races: when several sentences
+        // flush into the queue in the same tick (fast LLM burst), every task
+        // would await the SAME latest task — and the last one would await
+        // ITSELF. Circular await = permanent deadlock (stuck on "thinking").
+        const before = prev;
         const task = (async () => {
           if (aborted() || firstError) return;
           let buf: ArrayBuffer;
           try {
-            buf = await fetchTtsAudio(sentence);
+            buf = await fetchTtsAudio(sentence, signal);
           } catch (err) {
             firstError = err;
             return;
           }
           if (aborted() || firstError) return;
-          await prev; // wait for the previous sentence to finish playing
+          await before; // wait for the previous sentence to finish playing
           if (aborted() || firstError) return;
           if (!startedSpeaking) {
             startedSpeaking = true;
             setAgentState("speaking");
           }
+          noteSpoken(sentence); // echo guard: about to hit the speakers
           try {
             await playAudio(buf);
           } catch (err) {
@@ -620,7 +759,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       await prev;
       if (firstError) throw firstError;
     },
-    [fetchTtsAudio, playAudio, setAgentState]
+    [fetchTtsAudio, noteSpoken, playAudio, setAgentState]
   );
 
   /* ------------------- respond / transcript ------------------------ */
@@ -638,7 +777,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
    *  silent text in typing mode — a typed session never plays any sound. */
   const respond = useCallback(
     async (text: string): Promise<void> => {
-      if (modeRef.current === "voice") {
+      if (modeRef.current === "voice" || modeRef.current === "dictation") {
         await speak(text);
         return;
       }
@@ -661,24 +800,21 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
   /* -------------------------- workbench ----------------------------- */
 
   /** Execute a workbench command: toggle the grid, confirm out loud,
-   *  then resume the conversation loop (never hits the LLM). */
+   *  then resume the conversation loop (never hits the LLM). The mic never
+   *  stops for this — the echo guard filters Infinity's own confirmation. */
   const applyWorkbench = useCallback(
     async (action: WorkbenchAction) => {
       const opening = action === "open";
       useInfinity.getState().setWorkbench(opening);
 
-      // Stop recognition first so Infinity never hears its own confirmation.
+      // Drop anything half-captured so the confirmation can't be spoken over.
       const sess = sessionRef.current;
       if (sess) {
-        try {
-          sess.rec?.stop();
-        } catch {
-          /* noop */
-        }
         if (sess.debounce) clearTimeout(sess.debounce);
         if (sess.interimTimer) clearTimeout(sess.interimTimer);
         sess.finalBuf = "";
         sess.lastInterim = "";
+        setInterim("");
       }
 
       if (activeRef.current) {
@@ -691,14 +827,9 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         }
         if (!activeRef.current) return;
         const s2 = sessionRef.current;
-        if (s2 && !s2.stopped) {
-          window.setTimeout(() => {
-            const s3 = sessionRef.current;
-            if (s3 === s2 && !s3.stopped && activeRef.current) {
-              setAgentState("listening");
-              beginListeningRef.current(s3);
-            }
-          }, 300);
+        if (s2 && !s2.stopped && !s2.dictation) {
+          setAgentState("listening");
+          beginListeningRef.current(s2); // already running → no-op
         } else {
           setAgentState("idle");
         }
@@ -748,7 +879,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
           setAgentState("listening");
           beginListeningRef.current(s3);
         }
-      }, 300);
+      }, 220);
     } else {
       setAgentState("idle");
     }
@@ -804,7 +935,7 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         let designFailed = false;
         const willDesign = !spec && keyReady;
 
-        const spoken = respond(willDesign ? "OK, designing that now." : "OK, building that now.").catch(
+        const spoken = respond(willDesign ? "Designing it now." : "Building it now.").catch(
           () => {
             /* best effort */
           }
@@ -1012,7 +1143,6 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       setInterim("");
       noteUser(raw.trim());
       setError(null);
-      pauseMic();
 
       if ("all" in cmd) {
         const names = store.models.map((m) => m.name);
@@ -1047,321 +1177,329 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       })();
       return true;
     },
-    [noteUser, pauseMic, respond, resumeAfterAction]
+    [noteUser, respond, resumeAfterAction]
   );
 
-  /* --------------------- reality stress test ------------------------ */
-
-  const titleCase = (s: string) =>
-    s
-      .split(/\s+/)
-      .slice(0, 3)
-      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-      .join(" ");
-
-  /** "a chair, a mug and a rocket ship" for the which-one? reply. */
-  const listNames = (names: string[]) =>
-    names.length <= 1
-      ? names[0] ?? ""
-      : `${names.slice(0, -1).map((n) => `the ${n}`).join(", ")} and the ${names[names.length - 1]}`;
-
-  /** Intercept "run a stress test for X" — the reality physics test. The
-   *  LLM (when keyed) only IDENTIFIES real materials per part, streamed
-   *  live; every number is computed locally from published property tables
-   *  and classic mechanics. Weak points light up orange→red as the scan
-   *  sweeps, and the verdict is spoken aloud. Auto-builds X when it isn't
-   *  already on the bench. */
-  const tryStressTest = useCallback(
+  /** Intercept whole-bench tool commands — blueprint view, auto-arrange,
+   *  PNG snapshot, scene save/load, and "bring it back" delete undo. All
+   *  local (no LLM round-trip), so every one of them works without an API
+   *  key. Runs after delete ("clear the workbench" stays a delete) and
+   *  before the per-model actions. */
+  const tryBenchTool = useCallback(
     (raw: string): boolean => {
-      const cmd = matchStressTestCommand(raw);
-      if (!cmd) return false;
-
-      const store = useInfinity.getState();
-      const models = store.models;
+      const tool = matchBenchTool(raw);
+      if (!tool) return false;
 
       setInterim("");
-      setError(null);
-      store.setWorkbench(true); // like build: the test needs the bench
-      pauseMic();
       noteUser(raw.trim());
+      setError(null);
 
-      // ---- resolve the target model on the bench ----
-      let target: HoloModel | null = null;
-      if (cmd.object) {
-        const o = cmd.object.toLowerCase();
-        target =
-          (models.find((m) => m.name.toLowerCase() === o) ??
-            models.find((m) => m.name.toLowerCase().includes(o)) ??
-            models.find((m) => {
-              const first = m.name.toLowerCase().split(" ")[0];
-              return first.length > 3 && o.includes(first);
-            })) ??
-          null;
-      } else if (models.length === 1) {
-        target = models[0];
-      }
-
-      if (!target && !cmd.object) {
+      const store = useInfinity.getState();
+      const speak = (line: string) =>
         void (async () => {
           try {
-            await respond(
-              models.length === 0
-                ? "The workbench is empty — say build something first."
-                : `Which one? I have ${listNames(models.map((m) => m.name))} on the bench.`
-            );
+            await respond(line);
           } catch {
             /* best effort */
           }
           resumeAfterAction();
         })();
-        return true;
+
+      switch (tool.kind) {
+        case "undo-delete": {
+          if (store.lastDeleted.length === 0) {
+            speak("Nothing to bring back just now.");
+            return true;
+          }
+          const back = store.undoDelete();
+          const names = useInfinity
+            .getState()
+            .models.slice(-back)
+            .map((m) => m.name);
+          speak(
+            back === 1
+              ? `Brought back the ${names[0] ?? "model"}.`
+              : `Brought back ${back} models.`
+          );
+          return true;
+        }
+        case "scene-save": {
+          const saved = store.models.filter((m) => !m.pending);
+          if (saved.length === 0) {
+            speak("There's nothing on the bench to save yet.");
+            return true;
+          }
+          const slot =
+            tool.slot ??
+            store.scenes.findIndex((s) => s === null) >= 0
+              ? store.scenes.findIndex((s) => s === null)
+              : 0;
+          const name = store.saveScene(slot);
+          toast.success(`Scene saved · slot ${["one", "two", "three"][slot]}`);
+          speak(`Scene saved to slot ${["one", "two", "three"][slot]} — ${name}.`);
+          return true;
+        }
+        case "scene-load": {
+          const filled = store.scenes
+            .map((s, i) => (s ? { slot: i, savedAt: s.savedAt, count: s.models.length } : null))
+            .filter((x): x is { slot: number; savedAt: number; count: number } => x !== null);
+          if (filled.length === 0) {
+            speak("No saved scenes yet — say save the scene first.");
+            return true;
+          }
+          const slot =
+            tool.slot ??
+            filled.reduce((a, b) => (b.savedAt > a.savedAt ? b : a)).slot;
+          const scene = store.scenes[slot];
+          if (!scene || scene.models.length === 0) {
+            speak(`Scene slot ${["one", "two", "three"][slot]} is empty.`);
+            return true;
+          }
+          store.loadScene(slot);
+          speak(
+            scene.models.length === 1
+              ? `Scene loaded — the ${scene.models[0].name}.`
+              : `Scene loaded — ${scene.models.length} models on the bench.`
+          );
+          return true;
+        }
+        case "blueprint": {
+          store.setBlueprint(tool.on);
+          speak(tool.on ? "Blueprint mode on." : "Blueprint mode off.");
+          return true;
+        }
+        case "tidy": {
+          if (store.models.length === 0) {
+            speak("Nothing on the bench to arrange yet.");
+            return true;
+          }
+          store.arrangeModels();
+          // Cards glide for ~0.8s, then normal (instant) dragging resumes.
+          window.setTimeout(() => useInfinity.getState().setArranging(false), 850);
+          const n = store.models.length;
+          speak(
+            n === 1 ? "Centered it on the bench." : `Tidied up — ${n} models arranged.`
+          );
+          return true;
+        }
+        case "snapshot": {
+          if (!store.workbench) {
+            speak("Open the workbench first, then I'll snapshot it.");
+            return true;
+          }
+          const result = captureWorkbenchSnapshot();
+          if (result.ok) toast.success("Snapshot saved to your downloads");
+          speak(result.spoken);
+          return true;
+        }
+      }
+    },
+    [noteUser, respond, resumeAfterAction]
+  );
+
+  /** Intercept style & motion commands for models on the bench — "make it
+   *  spin", "take the rocket apart", "copy it", "make it red". All local
+   *  (no LLM round-trip), so they work without an API key, like every
+   *  workbench command. Runs BEFORE build ("make another one" duplicates,
+   *  it doesn't design a thing called "another one"). */
+  const tryModelAction = useCallback(
+    (raw: string): boolean => {
+      const store = useInfinity.getState();
+      if (!store.workbench) return false;
+      const models = store.models;
+      if (models.length === 0) return false;
+      const action = matchModelAction(raw, models.map((m) => m.name));
+      if (!action) return false;
+      if (action.kind === "recolor" && !hexForColorName(action.color)) return false;
+
+      // Resolve the target: a named model, else the most recently built
+      // ("make it spin" / "paint it red" with several models → the newest).
+      let target: HoloModel | undefined;
+      if (action.name) {
+        const needle = action.name.toLowerCase();
+        target =
+          models.find((m) => m.name.toLowerCase() === needle) ??
+          models.find((m) => m.name.toLowerCase().includes(needle));
+      } else if (action.kind === "spin" && !action.on) {
+        // "stop spinning" → the model that is actually spinning.
+        target = models.findLast((m) => !!m.spin) ?? models[models.length - 1];
+      } else if (action.kind === "explode" && !action.on) {
+        // "put it back together" → the model that is actually exploded.
+        target = models.findLast((m) => !!m.exploded) ?? models[models.length - 1];
+      } else if (action.kind === "xray" && !action.on) {
+        // "turn off the x-ray" → the model actually in x-ray.
+        target = models.findLast((m) => !!m.xray) ?? models[models.length - 1];
+      } else if (action.kind === "solid" && !action.on) {
+        // "make it a hologram again" → the model actually rendered solid.
+        target = models.findLast((m) => !!m.solid) ?? models[models.length - 1];
+      } else if (action.kind === "measure" && !action.on) {
+        // "hide the measurements" → the model actually being measured.
+        target = models.findLast((m) => !!m.measure) ?? models[models.length - 1];
+      } else if (action.kind === "focus" && !action.on) {
+        // "stop focusing" → the model actually presented.
+        target = models.find((m) => m.id === store.focusedId) ?? models[models.length - 1];
+      } else if (action.kind === "inspect" && !action.on) {
+        // "close the inspector" → whatever is under inspection.
+        target = models.find((m) => m.id === store.inspectId) ?? models[models.length - 1];
+      } else {
+        target = models[models.length - 1];
+      }
+      if (!target) return false; // named something we don't have → normal chat
+
+      setInterim("");
+      noteUser(raw.trim());
+      setError(null);
+
+      let spoken = "";
+      switch (action.kind) {
+        case "recolor": {
+          const hex = hexForColorName(action.color)!;
+          // Default: swap the DOMINANT color and keep accents (windows,
+          // flames…). "make it ALL red" repaints every part.
+          const dominant = dominantColor(target.spec);
+          const parts = target.spec.parts.map((p) =>
+            action.all || p.color === dominant ? { ...p, color: hex } : p
+          );
+          store.updateModel(target.id, { spec: { ...target.spec, parts } });
+          spoken = action.all
+            ? `Painted the ${target.name} ${action.color}, every part.`
+            : `The ${target.name} is ${action.color} now.`;
+          break;
+        }
+        case "spin":
+          store.updateModel(target.id, { spin: action.on ? HOLO_SPIN_SPEED : 0 });
+          spoken = action.on ? `Setting the ${target.name} spinning.` : "Stopped the spin.";
+          break;
+        case "explode":
+          store.updateModel(target.id, { exploded: action.on });
+          spoken = action.on
+            ? `Taking the ${target.name} apart.`
+            : `Putting the ${target.name} back together.`;
+          break;
+        case "duplicate": {
+          if (models.length >= MAX_MODELS) {
+            toast.error("The workbench is full — delete a model first.");
+            return true;
+          }
+          const src = target;
+          store.addModel({
+            id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            name: src.name,
+            spec: src.spec,
+            pos: {
+              x: Math.max(8, Math.min(92, src.pos.x + (src.pos.x > 55 ? -18 : 18))),
+              y: Math.max(10, Math.min(90, src.pos.y + (src.pos.y > 60 ? -12 : 12))),
+            },
+            rot: { ...src.rot },
+            scale: src.scale,
+            bornAt: Date.now(), // replays the part-by-part assembly
+          });
+          spoken = `Made a second ${src.name}.`;
+          break;
+        }
+        case "xray":
+          store.updateModel(target.id, { xray: action.on });
+          spoken = action.on
+            ? `X-raying the ${target.name} — shells off, skeleton on.`
+            : "X-ray off.";
+          break;
+        case "solid":
+          store.updateModel(target.id, { solid: action.on });
+          spoken = action.on
+            ? `Rendering the ${target.name} solid.`
+            : `The ${target.name} is hologram glass again.`;
+          break;
+        case "measure":
+          store.updateModel(target.id, { measure: action.on });
+          spoken = action.on
+            ? `Measuring the ${target.name}.`
+            : "Measurements off.";
+          break;
+        case "inspect":
+          // One inspector at a time — a new "inspect the X" switches it.
+          store.setInspect(action.on ? target.id : null);
+          spoken = action.on
+            ? `Inspecting the ${target.name}.`
+            : "Inspector closed.";
+          break;
+        case "focus":
+          store.setFocused(action.on ? target.id : null);
+          spoken = action.on
+            ? `Presenting the ${target.name}.`
+            : "Back to the full bench.";
+          break;
       }
 
       void (async () => {
-        const settings = useInfinity.getState().settings;
-        const keyReady = isConfigured(settings);
-        let model = target;
-        let ack: Promise<void> = Promise.resolve();
-
-        // ---- auto-build the object when it isn't on the bench ----
-        if (!model && cmd.object) {
-          ack = respond(`OK, building a ${cmd.object} first.`).catch(() => {});
-          const object = cmd.object;
-          if (models.length >= MAX_MODELS) {
-            toast.error("The workbench is full — delete a model first.");
-            try {
-              await ack;
-            } catch {
-              /* best effort */
-            }
-            resumeAfterAction();
-            return;
-          }
-
-          let spec: HoloSpec | null =
-            matchPhraseModel(object) ??
-            matchLibraryModel(object) ??
-            matchFamilyModel(object);
-          if (!spec) spec = cacheGetSpec(object);
-
-          let liveId: string | null = null;
-          if (!spec && keyReady) {
-            const startName = titleCase(object);
-            const spawnStore = useInfinity.getState();
-            const cardId = `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-            liveId = cardId;
-            spawnStore.addModel({
-              id: cardId,
-              name: startName,
-              spec: { name: startName, parts: [] },
-              pos: nextSlot(spawnStore.models.length),
-              rot: { x: 0.12, y: -0.55 },
-              bornAt: Date.now(),
-              pending: true,
-            });
-            try {
-              const out = await designHoloSpec({
-                object,
-                provider: settings.provider,
-                apiKey: settings.apiKey,
-                baseUrl: settings.baseUrl,
-                model: settings.model,
-                onPart: (_part: HoloPart, soFar: HoloPart[]) => {
-                  const partial = normalizeHoloSpec(startName, soFar);
-                  useInfinity.getState().updateModel(cardId, { spec: partial });
-                },
-              });
-              if (out?.spec) {
-                spec = out.spec;
-                if (!out.salvaged) cachePutSpec(object, out.spec);
-              }
-            } catch {
-              /* fall through to the generator below */
-            }
-          }
-          if (!spec) spec = generateModel(object);
-
-          const finalSpec = spec;
-          if (liveId) {
-            useInfinity.getState().updateModel(liveId, {
-              spec: finalSpec,
-              name: finalSpec.name,
-              pending: undefined,
-            });
-            model = useInfinity.getState().models.find((m) => m.id === liveId) ?? null;
-          } else {
-            const st = useInfinity.getState();
-            const cardId = `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-            st.addModel({
-              id: cardId,
-              name: finalSpec.name,
-              spec: finalSpec,
-              pos: nextSlot(st.models.length),
-              rot: { x: 0.12, y: -0.55 },
-              bornAt: Date.now(),
-            });
-            model = useInfinity.getState().models.find((m) => m.id === cardId) ?? null;
-          }
-
-          // let the card spawn + start assembling before the scan begins
-          await sleep(SPAWN_SETTLE_MS + 700);
-        }
-
-        if (!model) {
-          useInfinity.getState().setStress(null);
-          try {
-            await respond("I couldn't stage that object for testing.");
-          } catch {
-            /* best effort */
-          }
-          resumeAfterAction();
-          return;
-        }
-
-        const stressModel = model;
-        const parts = stressModel.spec.parts;
-        const stressId = stressModel.id;
-
-        if (parts.length < 3) {
-          try {
-            await respond(`The ${stressModel.name} has too little structure to stress test.`);
-          } catch {
-            /* best effort */
-          }
-          resumeAfterAction();
-          return;
-        }
-
-        // ---- scanning phase: beam sweeps while the LLM identifies ----
-        if (target) {
-          ack = respond(`Running the stress test on the ${stressModel.name}.`).catch(() => {});
-        }
-        useInfinity.getState().setStress({
-          modelId: stressId,
-          name: stressModel.name,
-          phase: "scanning",
-          partCount: parts.length,
-          partsAnalyzed: 0,
-          ratios: [],
-          score: null,
-          verdict: null,
-          structScore: null,
-          impactScore: null,
-          thermalScore: null,
-          materialsUsed: [],
-          weakPoints: [],
-          massKg: null,
-          heightM: null,
-          loadKg: null,
-          dropNote: null,
-          thermalNote: null,
-        });
-
-        const acc = {
-          mats: {} as Record<number, string>,
-          roles: {} as Record<number, string>,
-        };
-        let analyzed = 0;
-        if (keyReady) {
-          await requestStressAnalysis({
-            object: stressModel.name,
-            parts,
-            provider: settings.provider,
-            apiKey: settings.apiKey,
-            baseUrl: settings.baseUrl,
-            model: settings.model,
-            onLine: (line) => {
-              parseStressLine(line, parts.length, acc);
-              if (/^mat\b/i.test(line.trim())) {
-                analyzed++;
-                useInfinity.getState().updateStress({ partsAnalyzed: analyzed });
-              }
-            },
-          });
-          // keyless or failed stream → color-hint fallback inside
-          // completeAssignment — the physics still runs on real tables.
-        }
-
-        // ---- the physics (local, instant, real) ----
-        const assignment = completeAssignment(acc, parts, stressModel.name);
-        const result = runStressAnalysis(stressModel.name, parts, assignment);
-
-        useInfinity.getState().updateStress({
-          phase: "revealing",
-          ratios: result.risks,
-          score: result.score,
-          verdict: result.verdict,
-          structScore: result.structScore,
-          impactScore: result.impactScore,
-          thermalScore: result.thermalScore,
-          materialsUsed: result.materialsUsed,
-          weakPoints: result.weakPoints,
-          massKg: result.massKg,
-          heightM: result.heightM,
-          loadKg: result.loadKg,
-          dropNote: result.dropNote,
-          thermalNote: result.thermalNote,
-        });
-
-        // Reveal sweep (~1.25s bottom-up), then the steady heat map.
-        window.setTimeout(() => {
-          const cur = useInfinity.getState().stress;
-          if (cur && cur.modelId === stressId && cur.phase === "revealing") {
-            useInfinity.getState().updateStress({ phase: "done" });
-          }
-        }, 1400);
-
         try {
-          await ack;
-        } catch {
-          /* best effort */
-        }
-        try {
-          await respond(result.spokenSummary);
+          await respond(spoken);
         } catch {
           /* best effort */
         }
         resumeAfterAction();
-      })().catch((err) => {
-        console.error("stress test failed", err);
-        useInfinity.getState().setStress(null);
-        toast.error("The stress test hit a snag — try again.");
-        resumeAfterAction();
-      });
+      })();
       return true;
     },
-    [noteUser, pauseMic, respond, resumeAfterAction]
+    [noteUser, respond, resumeAfterAction]
   );
 
   /* ---------------------------- one turn ---------------------------- */
 
   const runTurn = useCallback(
-    async (userText: string) => {
-      if (stateRef.current === "thinking" || stateRef.current === "speaking") return;
+    async (userText: string, opts?: { fromDictation?: boolean; interrupt?: boolean }) => {
+      // The guard blocks a NEW turn while one is in flight. Dictation and
+      // barge-ins are the exceptions: dictation's "thinking" IS this turn's
+      // own state, and an interrupt deliberately REPLACES the in-flight turn.
+      if (!opts?.fromDictation && !opts?.interrupt) {
+        if (stateRef.current === "thinking" || stateRef.current === "speaking") return;
+      }
       if (tryWorkbench(userText)) return;
-      if (tryStressTest(userText)) return;
       if (tryDelete(userText)) return;
+      if (tryBenchTool(userText)) return;
+      if (tryModelAction(userText)) return;
       if (tryBuild(userText)) return;
       setError(null);
       noteUser(userText);
       setInterim("");
+
+      // An interrupt cuts off whatever the old turn was doing — audio FIRST
+      // (instant silence), then the old turn is aborted below.
+      if (opts?.interrupt) killAudio();
       setAgentState("thinking");
 
+      // This turn's OWN abort handle. A barge-in (or stop) aborts exactly
+      // this turn — never whatever turn happens to be current later on.
+      const ac = new AbortController();
+      try {
+        abortRef.current?.abort();
+      } catch {
+        /* noop */
+      }
+      abortRef.current = ac;
+
       const sessNow = sessionRef.current;
-      if (sessNow?.rec) {
+      // A live dictation clip is discarded — the typed/spoken turn that is
+      // starting now supersedes it (and we never record our own reply).
+      if (sessNow?.dictation && sessNow.recording) {
+        sessNow.discardNext = true;
+        sessNow.recording = false;
+        recordingRef.current = false;
+        setRecording(false);
         try {
-          sessNow.rec.stop();
+          sessNow.recorder?.stop();
         } catch {
           /* noop */
         }
       }
 
-      // VOICE: pipe each streamed sentence straight into TTS — Infinity
-      // starts speaking after the FIRST sentence, not the whole reply.
-      // TEXT: sentences are ignored; the full reply lands at the end.
-      const isVoice = modeRef.current === "voice";
+      // VOICE + DICTATION: pipe each streamed sentence straight into TTS —
+      // Infinity starts speaking after the FIRST sentence, not the whole
+      // reply. TEXT: sentences are ignored; the full reply lands at the end.
+      // The mic NEVER stops for this: recognition keeps running through
+      // thinking + speaking (the barge-in channel in onresult).
+      const isVoice = modeRef.current === "voice" || modeRef.current === "dictation";
       const queue = isVoice ? createSentenceQueue() : null;
-      const speaking = queue ? speakStreamed(queue.stream()) : null;
+      const speaking = queue ? speakStreamed(queue.stream(), ac.signal) : null;
 
       const resumeAfterReply = () => {
         if (!activeRef.current) return;
@@ -1370,10 +1508,17 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
           const delay = window.setTimeout(() => {
             const s3 = sessionRef.current;
             if (s3 === sess && !s3.stopped && activeRef.current) {
-              setAgentState("listening");
-              beginListeningRef.current(s3);
+              if (s3.dictation) {
+                // Push-to-talk: re-arm for the next tap (no auto-listening).
+                recordingRef.current = false;
+                setRecording(false);
+                setAgentState("idle");
+              } else {
+                setAgentState("listening");
+                beginListeningRef.current(s3);
+              }
             }
-          }, 350);
+          }, 220);
           void delay;
         } else {
           setAgentState("idle");
@@ -1385,10 +1530,10 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         reply = await askChatStream(userText, (sentence, fullSoFar) => {
           setLastReply(fullSoFar);
           queue?.push(sentence);
-        });
+        }, ac.signal);
       } catch (err) {
         queue?.end();
-        if (!activeRef.current || abortRef.current?.signal.aborted) return;
+        if (!activeRef.current || ac.signal.aborted) return;
         const msg =
           err instanceof Error && err.message ? err.message : "The AI service failed.";
         setError(msg);
@@ -1407,17 +1552,22 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         return;
       }
 
-      if (!activeRef.current) {
+      if (!activeRef.current || ac.signal.aborted) {
         queue?.end();
         return;
       }
+      // The chat stream is complete — no more sentences can ever arrive.
+      // End the queue so the speak pipeline's for-await can finish after the
+      // last sentence plays (without this, the turn hangs on "speaking"
+      // forever waiting for a next sentence that will never come).
+      queue?.end();
       setLastReply(reply);
 
       if (speaking) {
         try {
           await speaking;
         } catch (err) {
-          if (!activeRef.current || abortRef.current?.signal.aborted) return;
+          if (!activeRef.current || ac.signal.aborted) return;
           const msg = err instanceof Error && err.message ? err.message : "Voice playback failed.";
           setError(msg);
           toast.error(msg);
@@ -1426,17 +1576,176 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         // typing mode: silent reply in the transcript
         pushTranscript("infinity", reply);
       }
-      if (!activeRef.current) return;
+      if (!activeRef.current || ac.signal.aborted) return;
 
       resumeAfterReply();
     },
-    [askChatStream, noteUser, pushTranscript, setAgentState, speakStreamed, tryBuild, tryDelete, tryStressTest, tryWorkbench]
+    [askChatStream, killAudio, noteUser, pushTranscript, setAgentState, speakStreamed, tryBenchTool, tryBuild, tryDelete, tryModelAction, tryWorkbench]
   );
+
+  /** The user talked over Infinity — drop the in-flight turn (LLM stream +
+   *  audio) and start a fresh one with the captured words. */
+  const bargeIn = useCallback(
+    (text: string) => {
+      const t = text.trim();
+      if (!t) return;
+      setInterim("");
+      void runTurn(t, { interrupt: true });
+    },
+    [runTurn]
+  );
+  const bargeInRef = useRef(bargeIn);
+  useEffect(() => {
+    bargeInRef.current = bargeIn;
+  }, [bargeIn]);
+
+  /* ------------------------ push-to-talk ---------------------------- */
+  /* Browsers without the Web Speech API (Meta Quest 3, Firefox, …) still
+     get REAL voice: MediaRecorder captures the clip, /api/stt transcribes
+     it with the user's provider, and the transcript enters the exact same
+     conversation pipeline as recognized speech. */
+
+  const stopRecordingRef = useRef<() => void>(() => {});
+
+  /** Send one finished clip through /api/stt and into the conversation. */
+  const sendDictation = useCallback(
+    async (mySess: VoiceSession, blob: Blob) => {
+      mySess.recording = false;
+      recordingRef.current = false;
+      setRecording(false);
+
+      // A near-empty blob is a stray tap, not speech — re-arm quietly.
+      // (Quiet speakers are NOT filtered here — a manual tap always sends.)
+      if (blob.size < 1500) {
+        setAgentState("idle");
+        return;
+      }
+
+      setAgentState("thinking"); // transcribing counts as thinking
+      try {
+        const b64 = await blobToBase64(blob);
+        const s = useInfinity.getState().settings;
+        const res = await fetch("/api/stt", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            audio: b64,
+            mimeType: blob.type || "audio/webm",
+            provider: s.provider,
+            apiKey: s.apiKey,
+            baseUrl: s.baseUrl || undefined,
+          }),
+        });
+        const data = await safeJson<SttResponseBody>(res);
+        if (sessionRef.current !== mySess || mySess.stopped) return;
+        if (!res.ok || !data || !data.ok) {
+          throw new Error(data?.error || "Transcription failed.");
+        }
+        const text = (data.text || "").trim();
+        if (!text) {
+          toast("Didn't catch that — tap the mic and speak again.");
+          setAgentState("idle");
+          return;
+        }
+        void runTurn(text, { fromDictation: true });
+      } catch (err) {
+        if (sessionRef.current !== mySess || mySess.stopped) return;
+        const msg =
+          err instanceof Error && err.message ? err.message : "Transcription failed.";
+        setError(msg);
+        toast.error(msg);
+        setAgentState("idle");
+      }
+    },
+    [runTurn, setAgentState]
+  );
+
+  /** Begin capturing a clip on the session's live mic stream. */
+  const beginDictation = useCallback(
+    (mySess: VoiceSession) => {
+      if (mySess.stopped || !activeRef.current) return;
+      if (mySess.recording) return;
+      if (stateRef.current === "thinking" || stateRef.current === "speaking") return;
+      if (!mySess.micStream) return;
+
+      const mime = pickRecorderMime();
+      let rec: MediaRecorder;
+      try {
+        rec = mime
+          ? new MediaRecorder(mySess.micStream, { mimeType: mime })
+          : new MediaRecorder(mySess.micStream);
+      } catch {
+        toast.error("This browser can't record audio — type below instead.");
+        return;
+      }
+
+      const chunks: Blob[] = [];
+      rec.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunks.push(e.data);
+      };
+      rec.onstop = () => {
+        if (sessionRef.current !== mySess || mySess.stopped) return;
+        mySess.recorder = null;
+        if (mySess.discardNext) {
+          mySess.discardNext = false;
+          return;
+        }
+        const blob = new Blob(chunks, { type: rec.mimeType || mime || "audio/webm" });
+        void sendDictation(mySess, blob);
+      };
+
+      try {
+        rec.start(250); // steady chunks so nothing is lost on stop
+      } catch {
+        toast.error("Could not start the microphone recording.");
+        return;
+      }
+      mySess.recorder = rec;
+      mySess.recording = true;
+      mySess.recStart = performance.now();
+      mySess.speechHeard = false;
+      mySess.lastVoiceAt = performance.now();
+      recordingRef.current = true;
+      setRecording(true);
+      setError(null);
+      setAgentState("listening");
+    },
+    [sendDictation, setAgentState]
+  );
+
+  /** End the clip and send it (tap-to-send; silence detection calls this too). */
+  const stopRecording = useCallback(() => {
+    const sess = sessionRef.current;
+    if (!sess || !sess.recording) return;
+    sess.recording = false;
+    recordingRef.current = false;
+    setRecording(false);
+    try {
+      sess.recorder?.stop(); // onstop assembles + sends
+    } catch {
+      setAgentState("idle");
+    }
+  }, [setAgentState]);
+
+  useEffect(() => {
+    stopRecordingRef.current = stopRecording;
+  }, [stopRecording]);
+
+  const toggleRecording = useCallback(() => {
+    const sess = sessionRef.current;
+    if (!sess || !sess.dictation) return;
+    if (sess.recording) {
+      stopRecording();
+      return;
+    }
+    if (stateRef.current === "idle") beginDictation(sess);
+  }, [beginDictation, stopRecording]);
 
   /* --------------------- recognition wiring ------------------------- */
 
   const setupRecognition = useCallback(
     (mySess: VoiceSession) => {
+      if (!mySess.recCtor) return;
       const rec = new mySess.recCtor();
       rec.continuous = true;
       rec.interimResults = true;
@@ -1456,17 +1765,47 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         mySess.finalBuf = "";
         mySess.lastInterim = "";
         setInterim("");
-        try {
-          mySess.rec?.stop();
-        } catch {
-          /* noop */
-        }
+        // Remember what was just sent: recognition often emits trailing
+        // duplicate finals for the SAME utterance right after — those must
+        // never be mistaken for a barge-in.
+        lastSubmittedRef.current = { text: t, at: Date.now() };
+        // The mic KEEPS RUNNING — recognition stays up through the whole
+        // turn (barge-in channel below).
         void runTurn(t);
       };
 
       rec.onresult = (event) => {
         if (sessionRef.current !== mySess || mySess.stopped) return;
-        if (stateRef.current !== "listening") return;
+        const st = stateRef.current;
+
+        // ---- BARGE-IN CHANNEL — the mic never stops ----
+        // While Infinity is thinking or speaking, recognized finals are
+        // either the user interrupting (→ abort the turn, start a new one)
+        // or Infinity hearing its OWN voice through the speakers (→ echo,
+        // ignored by the guard).
+        if (st === "thinking" || st === "speaking") {
+          if (modeRef.current !== "voice") return;
+          let finals = "";
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const r = event.results[i];
+            if (r.isFinal) finals += r[0].transcript + " ";
+          }
+          const text = finals.trim();
+          if (!text) return;
+          // Echo of Infinity's own speech?
+          const spoken = spokenRef.current;
+          if (Date.now() - spoken.at < 3000 && isSpeechEcho(text, spoken.text)) return;
+          // Trailing duplicate of what was JUST submitted?
+          const sub = lastSubmittedRef.current;
+          if (Date.now() - sub.at < 2500 && isSpeechEcho(text, sub.text)) return;
+          // A single stray word is never an intentional interrupt.
+          const words = text.split(/\s+/).filter(Boolean).length;
+          if (words < 2 && text.length < 8) return;
+          bargeInRef.current(text);
+          return;
+        }
+
+        if (st !== "listening") return;
         let interimText = "";
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const r = event.results[i];
@@ -1484,12 +1823,12 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
           if (mySess.debounce) clearTimeout(mySess.debounce);
           // Small pause after final words → send. Kept short: every
           // millisecond here is added latency before the reply.
-          mySess.debounce = setTimeout(() => submitVoice(mySess.finalBuf), 650);
+          mySess.debounce = setTimeout(() => submitVoice(mySess.finalBuf), 480);
         } else if (interimText.trim()) {
           // Safety net: some browsers stall before emitting a final result.
           mySess.interimTimer = setTimeout(
             () => submitVoice(mySess.lastInterim),
-            1700
+            1500
           );
         }
       };
@@ -1513,7 +1852,9 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
 
       rec.onend = () => {
         if (sessionRef.current !== mySess || mySess.stopped) return;
-        if (stateRef.current === "listening" && modeRef.current === "voice") {
+        // ALWAYS-ON: restart recognition in ANY state (listening, thinking,
+        // speaking) — it only ever stays down when the session stops.
+        if (modeRef.current === "voice" && activeRef.current) {
           beginListeningRef.current(mySess);
         }
       };
@@ -1536,13 +1877,16 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       return;
     }
     const recCtor = getSpeechRecognitionCtor();
-    if (!recCtor) {
+    if (!recCtor && !supportsDictation()) {
       toast("Voice input isn't supported in this browser — type instead (press /).");
       fallbackToText(
         "Voice input isn't supported in this browser — type below and Infinity will answer out loud."
       );
       return;
     }
+    // No Web Speech API (Meta Quest 3, Firefox, …) but MediaRecorder works →
+    // run the session as push-to-talk dictation instead of auto-listening.
+    const dictation = !recCtor;
 
     const sess: VoiceSession = {
       stopped: false,
@@ -1556,11 +1900,18 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       interimTimer: null,
       debounce: null,
       lastRestart: 0,
+      dictation,
+      recorder: null,
+      recording: false,
+      recStart: 0,
+      speechHeard: false,
+      lastVoiceAt: 0,
+      discardNext: false,
     };
     sessionRef.current = sess;
     activeRef.current = true;
-    modeRef.current = "voice";
-    setMode("voice");
+    modeRef.current = dictation ? "dictation" : "voice";
+    setMode(dictation ? "dictation" : "voice");
     setSessionActive(true);
     setMicBlocked(false);
     setError(null);
@@ -1594,9 +1945,14 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         sess.micAnalyser = an;
         sess.micData = new Uint8Array(new ArrayBuffer(an.fftSize));
 
-        setupRecognition(sess);
-        setAgentState("listening");
-        beginListening(sess);
+        if (sess.dictation) {
+          // Push-to-talk: armed and waiting for the first mic tap.
+          setAgentState("idle");
+        } else {
+          setupRecognition(sess);
+          setAgentState("listening");
+          beginListening(sess);
+        }
       } catch {
         if (sessionRef.current !== sess) return;
         fallbackToText(
@@ -1631,8 +1987,9 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       }
       // Workbench commands are local — they work even without an API key.
       if (tryWorkbench(t)) return;
-      if (tryStressTest(t)) return;
       if (tryDelete(t)) return;
+      if (tryBenchTool(t)) return;
+      if (tryModelAction(t)) return;
       if (tryBuild(t)) return;
       // Keyless: the most common bench questions still get a real answer
       // from the local snapshot instead of an error toast.
@@ -1657,9 +2014,9 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
         onNeedSettingsRef.current();
         return;
       }
-      void runTurn(t);
+      void runTurn(t, { interrupt: true });
     },
-    [runTurn, setAgentState, tryBuild, tryDelete, tryStressTest, tryWorkbench]
+    [runTurn, setAgentState, tryBenchTool, tryBuild, tryDelete, tryModelAction, tryWorkbench]
   );
 
   const toggle = useCallback(() => {
@@ -1676,7 +2033,27 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
       let target = 0;
       const sess = sessionRef.current;
       if (st === "listening" && sess?.micAnalyser && sess.micData) {
-        target = rms(sess.micAnalyser, sess.micData);
+        const v = rms(sess.micAnalyser, sess.micData);
+        target = v;
+        // Push-to-talk auto-send: REAL mic-level silence detection. The clip
+        // ends when speech was heard and the mic has been quiet for 1.2s
+        // (or at a 30s hard cap). Never a timer pretending to be listening.
+        if (sess.dictation && sess.recording) {
+          const now = performance.now();
+          if (v > 0.055) {
+            sess.speechHeard = true;
+            sess.lastVoiceAt = now;
+          }
+          const elapsed = now - sess.recStart;
+          // Auto-send ONLY after real speech was heard — never on ambient
+          // noise alone (a silent room must not fire off empty clips).
+          if (sess.speechHeard && elapsed > 900 && now - sess.lastVoiceAt > 1200) {
+            stopRecordingRef.current();
+          } else if (elapsed > 30000) {
+            // 30s hard cap.
+            stopRecordingRef.current();
+          }
+        }
       } else if (st === "speaking") {
         if (playbackAnalyserRef.current && playbackDataRef.current) {
           target = rms(playbackAnalyserRef.current, playbackDataRef.current);
@@ -1707,9 +2084,12 @@ export function useInfinityAgent(onNeedSettings: () => void): UseInfinityAgent {
     transcript,
     building,
     levelRef,
+    dictation: mode === "dictation" && sessionActive,
+    recording,
     start,
     stop,
     toggle,
+    toggleRecording,
     sendText,
   };
 }

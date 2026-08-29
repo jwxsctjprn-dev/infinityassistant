@@ -179,11 +179,59 @@
 
 /* ------------------------------------------------------------------ */
 /* Workbench mode — flat full-screen grid of faint blue lines           */
+/*                                                                      */
+/* The grid has a circular cutout where the corner orb sits: the mask   */
+/* punches a clean hole (with a soft feathered edge) out of the lines.  */
+/* Geometry MUST stay in sync with the CornerOrb wrapper in page.tsx:   */
+/*   mobile:  orb 80px at left 24px / bottom calc(safe + 80px)          */
+/*   sm+:     orb 96px at left 40px / bottom 40px                       */
 /* ------------------------------------------------------------------ */
+
+.wb-grid {
+  /* mobile: orb center = (24+40, 80+40) px from the bottom-left */
+  --cut-cx: 64px;
+  --cut-cy: calc(120px + env(safe-area-inset-bottom));
+  --cut-r: 56px;
+  --cut-feather: 24px;
+}
+@media (min-width: 640px) {
+  .wb-grid {
+    /* sm+: orb center = (40+48, 40+48) px */
+    --cut-cx: 88px;
+    --cut-cy: 88px;
+    --cut-r: 66px;
+    --cut-feather: 26px;
+  }
+}
 
 .wb-grid {
   background-image:
     linear-gradient(rgba(96, 165, 250, 0.25) 1px, transparent 1px),
     linear-gradient(90deg, rgba(96, 165, 250, 0.25) 1px, transparent 1px);
   background-size: 48px 48px;
+  -webkit-mask-image: radial-gradient(
+    circle at var(--cut-cx) calc(100% - var(--cut-cy)),
+    transparent calc(var(--cut-r) - 1px),
+    black calc(var(--cut-r) + var(--cut-feather))
+  );
+  mask-image: radial-gradient(
+    circle at var(--cut-cx) calc(100% - var(--cut-cy)),
+    transparent calc(var(--cut-r) - 1px),
+    black calc(var(--cut-r) + var(--cut-feather))
+  );
+}
+
+/* Blueprint engineering view — monochrome cyan ink with a bolder major
+   grid layered over the fine one (voice: "blueprint mode"). */
+.wb-grid.wb-blueprint {
+  background-image:
+    linear-gradient(rgba(34, 211, 238, 0.30) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 211, 238, 0.30) 1px, transparent 1px),
+    linear-gradient(rgba(34, 211, 238, 0.10) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 211, 238, 0.10) 1px, transparent 1px);
+  background-size:
+    240px 240px,
+    240px 240px,
+    48px 48px,
+    48px 48px;
 }

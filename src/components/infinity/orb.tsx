@@ -8,6 +8,8 @@ interface OrbProps {
   /** Mutable 0..1 loudness, written by the agent hook every frame. */
   levelRef: React.MutableRefObject<number>;
   onClick: () => void;
+  /** Compact variant — the small corner orb on the workbench grid. */
+  compact?: boolean;
 }
 
 const STATE_PARAMS: Record<
@@ -20,7 +22,7 @@ const STATE_PARAMS: Record<
   speaking: { base: 1.02, amp: 0.34, glowBase: 0.42, glowAmp: 0.55, bright: 0.35 },
 };
 
-export function Orb({ state, levelRef, onClick }: OrbProps) {
+export function Orb({ state, levelRef, onClick, compact = false }: OrbProps) {
   const coreRef = useRef<HTMLButtonElement>(null);
   const glowRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef<AgentState>(state);
@@ -65,7 +67,9 @@ export function Orb({ state, levelRef, onClick }: OrbProps) {
       <div
         ref={glowRef}
         aria-hidden
-        className="absolute h-64 w-64 rounded-full bg-blue-500/30 blur-[70px] will-change-transform sm:h-80 sm:w-80"
+        className={`absolute rounded-full bg-blue-500/30 blur-[70px] will-change-transform ${
+          compact ? "h-24 w-24 sm:h-28 sm:w-28" : "h-64 w-64 sm:h-80 sm:w-80"
+        }`}
         style={{ opacity: 0.22 }}
       />
 
@@ -75,7 +79,9 @@ export function Orb({ state, levelRef, onClick }: OrbProps) {
           <span
             key={`${state}-${i}`}
             aria-hidden
-            className="orb-ripple pointer-events-none absolute h-40 w-40 rounded-full border border-sky-400/30 sm:h-48 sm:w-48"
+            className={`orb-ripple pointer-events-none absolute rounded-full border border-sky-400/30 ${
+              compact ? "h-20 w-20 sm:h-24 sm:w-24" : "h-40 w-40 sm:h-48 sm:w-48"
+            }`}
             style={{ animationDelay: `${i * 0.9}s` }}
           />
         ))}
@@ -86,7 +92,11 @@ export function Orb({ state, levelRef, onClick }: OrbProps) {
         type="button"
         onClick={onClick}
         aria-label={`Infinity — ${state === "idle" ? "tap to start talking" : state}`}
-        className="group relative h-40 w-40 cursor-pointer rounded-full border-0 bg-transparent p-0 outline-none will-change-transform focus-visible:ring-2 focus-visible:ring-sky-400/60 focus-visible:ring-offset-2 focus-visible:ring-offset-black sm:h-48 sm:w-48"
+        className={`group relative cursor-pointer rounded-full border-0 bg-transparent p-0 outline-none will-change-transform focus-visible:ring-2 focus-visible:ring-sky-400/60 focus-visible:ring-offset-2 focus-visible:ring-offset-black ${
+          compact
+            ? "h-20 w-20 sm:h-24 sm:w-24"
+            : "h-40 w-40 sm:h-48 sm:w-48"
+        }`}
       >
         {/* base sphere */}
         <span

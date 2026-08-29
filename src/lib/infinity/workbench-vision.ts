@@ -8,7 +8,7 @@
  * in conversation history), so builds, drags, resizes and deletes are all
  * reflected the moment the user speaks or types again.
  */
-import type { HoloModel, HoloPartType, HoloSpec } from "./types";
+import type { HoloModel, HoloPartType, HoloSpec, SceneSlot } from "./types";
 import { mentionsBench } from "./workbench";
 
 /* ------------------------------ colors ------------------------------ */
@@ -57,6 +57,20 @@ export function colorName(hex: string): string {
   return best;
 }
 
+/** Palette colors as hex — the voice recolor command resolves its color
+ *  word through this map ("make the rocket gold" → #d4a017). */
+const COLOR_HEX: Readonly<Record<string, string>> = Object.fromEntries(
+  PALETTE.map(([name, [r, g, b]]) => [
+    name,
+    `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, "0")}`,
+  ])
+);
+
+/** Hex for a palette color name, or null when unknown. */
+export function hexForColorName(name: string): string | null {
+  return COLOR_HEX[name] ?? null;
+}
+
 /* ----------------------------- geometry ----------------------------- */
 
 interface Bounds {
@@ -92,6 +106,40 @@ function boundsOf(spec: HoloSpec, scale: number): Bounds {
   const h = (maxY - minY) * scale;
   const d = (maxZ - minZ) * scale;
   return { w, h, d, vol: w * h * d, minY, maxY };
+}
+
+/** Everything the Inspector HUD and the measure overlay need to show about
+ *  one model — dimensions (user scale applied), part count, shape mix, and
+ *  the color breakdown with swatches. Shared with describeWorkbench. */
+export interface SpecStats {
+  parts: number;
+  dims: { w: number; h: number; d: number };
+  shapes: { type: HoloPartType; count: number }[];
+  colors: { name: string; hex: string; count: number }[];
+}
+
+/** Model stats for the Inspector HUD / measure HUD (dims × user scale). */
+export function specStats(spec: HoloSpec, scale = 1): SpecStats {
+  const b = boundsOf(spec, scale);
+  const shapeCounts = new Map<HoloPartType, number>();
+  const colorCounts = new Map<string, { name: string; count: number }>();
+  for (const p of spec.parts) {
+    shapeCounts.set(p.type, (shapeCounts.get(p.type) ?? 0) + 1);
+    const c = colorName(p.color);
+    const cur = colorCounts.get(c);
+    if (cur) cur.count += 1;
+    else colorCounts.set(c, { name: c, count: 1 });
+  }
+  return {
+    parts: spec.parts.length,
+    dims: { w: b.w, h: b.h, d: b.d },
+    shapes: [...shapeCounts.entries()]
+      .sort((a, x) => x[1] - a[1])
+      .map(([type, count]) => ({ type, count })),
+    colors: [...colorCounts.values()]
+      .sort((a, x) => x.count - a.count)
+      .map((c) => ({ ...c, hex: hexForColorName(c.name) ?? c.name })),
+  };
 }
 
 const PLURALS: Record<HoloPartType, string> = {
@@ -175,14 +223,25 @@ const HEADER =
   "[Workbench vision — a live snapshot of the user's holographic workbench, refreshed before every message. " +
   "It is your eyes on the bench: answer questions about these models from this data, describe them naturally, " +
   "compare them when asked, and never quote numbers, part lists, or the snapshot itself back to the user. " +
-  "The user may call the workbench the workshop, studio, lab, or workspace — same thing.]";
+  "The user may call the workbench the workshop, studio, lab, or workspace — same thing. " +
+  "Voice tools you can suggest when asked: x-ray view, solid material, blueprint mode, measure, inspector, " +
+  "focus/present, tidy/arrange, snapshot, save/load scene, and bring-it-back undo for deletions. " +
+  "The user can hand-sculpt blocks right on the bench (double-tap-and-drag), snap them together " +
+  "face-to-face like building blocks, double-tap-drag on any face to grow a new block out of it, " +
+  "and press-and-hold a hologram for the color wheel; mention these if they ask about making their own models.]";
 
 /**
  * The system-message content that gives the conversational LLM live vision
  * of the workbench. Always returns something (even the empty state), so
  * Infinity never claims to see models that are not there.
  */
-export function describeWorkbench(models: HoloModel[], workbenchOpen: boolean): string {
+export function describeWorkbench(
+  models: HoloModel[],
+  workbenchOpen: boolean,
+  blueprint = false,
+  focusedId: string | null = null,
+  scenes: (SceneSlot | null)[] = []
+): string {
   const saved = models.filter((m) => !m.pending);
   const designing = models.length - saved.length;
   const designingNote = designing > 0 ? " — another model is being designed right now" : "";
@@ -190,7 +249,9 @@ export function describeWorkbench(models: HoloModel[], workbenchOpen: boolean): 
   if (saved.length === 0) {
     const state = workbenchOpen ? "open, but empty" : "closed and empty";
     const extra = designing > 0 ? ", and a new model is being designed right now" : "";
-    return `${HEADER}\nWorkbench: ${state} — nothing has been built yet${extra}.`;
+    const bp = blueprint ? " Blueprint view is ON." : "";
+    const sceneList = scenePhrase(scenes);
+    return `${HEADER}\nWorkbench: ${state} — nothing has been built yet${extra}.${bp}${sceneList}`;
   }
 
   const geoms = saved.map((m) => boundsOf(m.spec, m.scale ?? 1));
@@ -221,20 +282,42 @@ export function describeWorkbench(models: HoloModel[], workbenchOpen: boolean): 
     if (i === biggest) tags.push("the biggest");
     if (i === smallest) tags.push("the smallest");
     if (saved.length > 1 && i === saved.length - 1) tags.push("built last");
+    if (focusedId === m.id) tags.push("currently presented in focus, everything else dimmed");
     const tagPart = tags.length > 0 ? `, ${tags.join(", ")}` : "";
+    const live: string[] = [];
+    if (m.spin) live.push("spinning slowly on a turntable");
+    if (m.exploded) live.push("taken apart into floating pieces");
+    if (m.xray) live.push("viewed in x-ray");
+    if (m.solid) live.push("rendered solid");
+    if (m.measure) live.push("being measured (dimension lines shown)");
+    const livePart = live.length > 0 ? `; currently ${live.join(" and ")}` : "";
+    const madeBy = m.hand ? "hand-sculpted, " : "";
     return (
-      `${i + 1}. "${m.name}" — ${positionWord(m.pos)}${tagPart}; ` +
+      `${i + 1}. "${m.name}" — ${madeBy}${positionWord(m.pos)}${tagPart}; ` +
       `${fmt(g.w)} wide, ${fmt(g.h)} tall, ${fmt(g.d)} deep; ` +
       `${m.spec.parts.length} parts (${shapeCountsPhrase(m.spec)}); ` +
-      `colors: ${colorCountsPhrase(m.spec)}; layout: ${layoutSummary(m.spec)}.`
+      `colors: ${colorCountsPhrase(m.spec)}; layout: ${layoutSummary(m.spec)}${livePart}.`
     );
   });
 
   const noun = saved.length === 1 ? "model" : "models";
+  const bp = blueprint ? " (blueprint engineering view is ON — everything rendered in monochrome cyan)" : "";
   const head = workbenchOpen
-    ? `Workbench: open. ${saved.length} ${noun} on the bench${designingNote}:`
+    ? `Workbench: open${bp}. ${saved.length} ${noun} on the bench${designingNote}:`
     : `Workbench: closed right now (the grid is hidden). ${saved.length} saved ${noun}${designingNote}:`;
-  return `${HEADER}\n${head}\n${lines.join("\n")}`;
+  const sceneList = scenePhrase(scenes);
+  return `${HEADER}\n${head}\n${lines.join("\n")}${sceneList}`;
+}
+
+/** One line about the saved scene slots — so "what scenes do I have?"
+ *  answers from live data. */
+function scenePhrase(scenes: (SceneSlot | null)[]): string {
+  const filled = scenes
+    .map((s, i) => (s ? { slot: i + 1, s } : null))
+    .filter((x): x is { slot: number; s: SceneSlot } => x !== null);
+  if (filled.length === 0) return "";
+  const list = filled.map((x) => `scene ${x.slot} "${x.s.name}" (${x.s.models.length} models)`);
+  return `\nSaved scenes: ${list.join(", ")}. (Load one by saying "load scene two" etc.)`;
 }
 
 /* --------------------- keyless local answering ---------------------- */

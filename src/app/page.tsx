@@ -4,11 +4,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Settings2 } from "lucide-react";
 import { Orb } from "@/components/infinity/orb";
+import { MrMode, VrHeadsetIcon } from "@/components/infinity/mr-mode";
 import { SettingsDialog } from "@/components/infinity/settings-dialog";
+import { DictationControls } from "@/components/infinity/dictation-controls";
+import { VersionBadge } from "@/components/infinity/whats-new";
 import { WorkbenchGrid } from "@/components/infinity/workbench-grid";
 import { WorkbenchModels } from "@/components/infinity/workbench-models";
 import { WorkbenchDraw } from "@/components/infinity/workbench-draw";
-import { StressHud } from "@/components/infinity/stress-hud";
+import { WorkbenchSculpt } from "@/components/infinity/workbench-sculpt";
 import { Toaster } from "@/components/ui/sonner";
 import { useInfinityAgent } from "@/hooks/use-infinity-agent";
 import { isConfigured, useInfinity } from "@/lib/infinity/settings";
@@ -20,6 +23,11 @@ const STATE_LABEL: Record<string, string> = {
   speaking: "Speaking",
 };
 
+/** Auto-open settings at most ONCE per page load — the main screen
+ *  remounts every time mixed reality exits, and a per-component ref would
+ *  re-open the dialog after each MR session. */
+let settingsAutoOpened = false;
+
 export default function Home() {
   const [mounted, setMounted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -29,6 +37,9 @@ export default function Home() {
   const captions = useInfinity((s) => s.settings.captions);
   const workbench = useInfinity((s) => s.workbench);
   const setWorkbench = useInfinity((s) => s.setWorkbench);
+  const blueprint = useInfinity((s) => s.blueprint);
+  const mrActive = useInfinity((s) => s.mrActive);
+  const setMrActive = useInfinity((s) => s.setMrActive);
 
   const onNeedSettings = useCallback(() => setSettingsOpen(true), []);
   const agent = useInfinityAgent(onNeedSettings);
@@ -42,10 +53,12 @@ export default function Home() {
   useEffect(() => {
     if (
       mounted &&
+      !settingsAutoOpened &&
       !autoOpenedRef.current &&
       !settingsOpen &&
       !isConfigured(useInfinity.getState().settings)
     ) {
+      settingsAutoOpened = true;
       autoOpenedRef.current = true;
       const t = setTimeout(() => setSettingsOpen(true), 600);
       return () => clearTimeout(t);
@@ -69,6 +82,11 @@ export default function Home() {
   }, [agent.transcript]);
 
   const handleToggle = useCallback(() => {
+    // Push-to-talk browsers (Quest 3, Firefox, …): the orb toggles a clip.
+    if (agent.mode === "dictation") {
+      agent.toggleRecording();
+      return;
+    }
     agent.toggle();
   }, [agent]);
 
@@ -77,8 +95,8 @@ export default function Home() {
       e.preventDefault();
       const v = inputValue.trim();
       if (!v) return;
-      // A turn is already in flight — keep the text so it isn't lost.
-      if (agent.state === "thinking" || agent.state === "speaking") return;
+      // Typed text always sends — even mid-turn it interrupts (barge-in),
+      // so the keyboard keeps the same quick back-and-forth as voice.
       setInputValue("");
       agent.sendText(v);
     },
@@ -88,6 +106,8 @@ export default function Home() {
   // Keyboard: ⌘, settings · / focus typing · Space toggles voice · Esc stops
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Mixed reality owns the whole screen (and its own keys) while active.
+      if (useInfinity.getState().mrActive) return;
       const active = document.activeElement;
       const inInput = active === inputRef.current;
       if ((e.metaKey || e.ctrlKey) && e.key === ",") {
@@ -101,14 +121,18 @@ export default function Home() {
           inputRef.current?.blur();
           return;
         }
-        // Drawing mode peels off first, then the workbench closes.
+        // Drawing mode peels off first, then focus mode and the inspector,
+        // then the workbench closes, then the session stops.
         if (useInfinity.getState().drawing) {
           useInfinity.getState().setDrawing(false);
           return;
         }
-        // Stress results peel off before the bench itself.
-        if (useInfinity.getState().stress) {
-          useInfinity.getState().setStress(null);
+        if (useInfinity.getState().focusedId) {
+          useInfinity.getState().setFocused(null);
+          return;
+        }
+        if (useInfinity.getState().inspectId) {
+          useInfinity.getState().setInspect(null);
           return;
         }
         if (workbench) {
@@ -155,14 +179,29 @@ export default function Home() {
   }, [agent, handleToggle, setWorkbench, settingsOpen, workbench]);
 
   const configured = mounted ? isConfigured(useInfinity.getState().settings) : false;
-  const stateLabel = STATE_LABEL[agent.state];
+  // Push-to-talk session (no Web Speech API): the orb + mic button toggle
+  // a clip; "listening" means actively recording one.
+  const dictMode = agent.mode === "dictation" && agent.sessionActive;
+  const stateLabel =
+    dictMode && agent.state === "listening" ? "Listening · tap to send" : STATE_LABEL[agent.state];
 
   // Typing mode = silent text session (no mic, no sound)
   const textMode = agent.mode === "text" && agent.sessionActive;
 
+  // Mixed reality takeover — the AI-free workbench lives inside the XR
+  // session; any live conversation on the flat page stops first.
+  if (mounted && mrActive) {
+    return <MrMode onExit={() => {
+      setMrActive(false);
+      useInfinity.getState().setWorkbench(false);
+    }} />;
+  }
+
   let hint = "";
   if (!agent.sessionActive) {
     hint = configured ? "CLICK THE ORB TO TALK · OR TYPE BELOW" : "OPEN SETTINGS TO ADD YOUR API KEY";
+  } else if (dictMode && agent.state === "idle" && !agent.recording) {
+    hint = "TAP THE MIC TO SPEAK · TAP AGAIN TO SEND";
   } else if (textMode && agent.state === "idle" && agent.transcript.length === 0) {
     hint = "TYPE BELOW · ENTER TO SEND";
   }
@@ -174,8 +213,24 @@ export default function Home() {
       {gridVisible && <WorkbenchModels building={agent.building} />}
       {/* Marker annotations + the floating marker tool (workbench only) */}
       {gridVisible && <WorkbenchDraw />}
-      {/* Reality physics stress-test results panel */}
-      {gridVisible && <StressHud />}
+      {/* Hand-sculpting: double-tap-hold-drag on the bench draws blocks */}
+      {gridVisible && <WorkbenchSculpt />}
+
+      {/* Mixed reality — the AI-free drafting table (Meta Quest 3) */}
+      <button
+        type="button"
+        aria-label="Enter the hologram sandbox in mixed reality (Quest 3)"
+        title="Holo Sandbox MR — pull holograms out of your palm (Quest 3)"
+        onClick={() => {
+          if (agent.sessionActive) agent.stop();
+          setMrActive(true);
+        }}
+        className={`absolute right-[4.5rem] top-5 z-20 rounded-full p-2.5 text-zinc-500 transition-all duration-700 hover:bg-white/5 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/50 ${
+          workbench ? "pointer-events-none opacity-0" : "opacity-100"
+        }`}
+      >
+        <VrHeadsetIcon className="h-5 w-5" />
+      </button>
 
       {/* Settings */}
       <button
@@ -198,6 +253,50 @@ export default function Home() {
       >
         INFINITY
       </p>
+
+      {/* Version badge + release notes */}
+      <VersionBadge />
+
+      {/* Blueprint mode tag — visible whenever the bench is in engineering
+          view (voice: "blueprint mode"). Sits in the settings spot, which is
+          hidden while the workbench is open. */}
+      {gridVisible && blueprint && (
+        <motion.span
+          initial={{ opacity: 0, y: -6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -6 }}
+          transition={{ duration: 0.35 }}
+          aria-label="Blueprint mode active"
+          className="absolute right-5 top-5 z-20 rounded-full border border-cyan-300/30 bg-black/70 px-3.5 py-1.5 text-[9px] font-light uppercase tracking-[0.4em] text-cyan-200/90 backdrop-blur-sm"
+        >
+          Blueprint
+        </motion.span>
+      )}
+
+      {/* Workbench: the orb re-materializes in the bottom-left corner and
+          cuts a circular hole out of the grid (mask geometry lives in
+          globals.css — keep the two in sync). */}
+      <AnimatePresence>
+        {gridVisible && (
+          <motion.div
+            key="corner-orb"
+            initial={{ opacity: 0, scale: 0.75, y: 14 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.75, transition: { duration: 0.3 } }}
+            transition={{ delay: 0.55, duration: 0.7, ease: [0.16, 1, 0.3, 1] }}
+            className="absolute bottom-[calc(env(safe-area-inset-bottom)+5rem)] left-6 z-20 sm:bottom-10 sm:left-10"
+          >
+            <div className="flex items-center gap-3">
+              <Orb state={agent.state} levelRef={agent.levelRef} onClick={handleToggle} compact />
+              {agent.sessionActive && stateLabel && (
+                <span className="pb-1.5 text-[10px] font-light uppercase tracking-[0.35em] text-sky-300/60">
+                  {stateLabel}
+                </span>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Orb + status (fades fully away in workbench) */}
       <main
@@ -249,6 +348,21 @@ export default function Home() {
         </div>
       </main>
 
+      {/* Push-to-talk controls (Quest 3 / Firefox — no Web Speech API) */}
+      {mounted && dictMode && (
+        <div
+          className={`absolute inset-x-0 bottom-[5.75rem] z-20 flex justify-center px-6 transition-opacity duration-700 ${
+            workbench ? "opacity-40" : "opacity-100"
+          }`}
+        >
+          <DictationControls
+            recording={agent.recording}
+            onToggle={agent.toggleRecording}
+            onEnd={agent.stop}
+          />
+        </div>
+      )}
+
       {/* Typing-mode transcript — the silent conversation log */}
       {mounted && textMode && !workbench && (
         <div className="pointer-events-none absolute inset-x-0 bottom-[5.75rem] z-10 flex justify-center px-6">
@@ -287,14 +401,22 @@ export default function Home() {
         </p>
       )}
 
-      {/* Captions — voice mode only (typing mode has the transcript) */}
+      {/* Captions — voice mode only (typing mode has the transcript).
+          In the workbench they anchor just above the corner orb. */}
       {mounted && captions && agent.mode !== "text" && (
         <div
-          className={`pointer-events-none absolute inset-x-0 bottom-24 z-10 flex justify-center px-6 transition-opacity duration-700 ${
-            workbench ? "opacity-0" : "opacity-100"
+          className={`pointer-events-none absolute z-10 flex px-6 transition-all duration-700 sm:px-10 ${
+            workbench
+              ? "bottom-[calc(env(safe-area-inset-bottom)+10.6rem)] left-0 justify-start opacity-100 sm:bottom-[9.1rem]"
+              : dictMode
+                ? "inset-x-0 bottom-[13rem] justify-center opacity-100"
+                : "inset-x-0 bottom-24 justify-center opacity-100"
           }`}
         >
-          <div className="max-w-xl space-y-1.5 text-center" aria-live="polite">
+          <div
+            className={`max-w-xl space-y-1.5 ${workbench ? "max-w-[15rem] space-y-1 text-left sm:max-w-xs" : "text-center"}`}
+            aria-live="polite"
+          >
             <AnimatePresence>
               {agent.sessionActive && agent.state === "listening" && agent.interim && (
                 <motion.p

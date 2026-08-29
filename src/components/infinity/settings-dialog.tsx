@@ -431,6 +431,10 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                   placeholder={DEFAULT_SYSTEM_PROMPT}
                   className="min-h-[72px] border-white/10 bg-white/5 text-xs leading-relaxed focus:ring-sky-500/40"
                 />
+                <p className="text-[11px] leading-relaxed text-zinc-500">
+                  Leave empty for Infinity&apos;s built-in voice — composed, precise, a little dry.
+                  Write your own to change how it talks.
+                </p>
               </div>
               <Button
                 type="button"

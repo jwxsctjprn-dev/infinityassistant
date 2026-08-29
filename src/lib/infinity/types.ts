@@ -57,6 +57,28 @@ export interface TtsRequestBody {
   rate?: number;
 }
 
+/** POST /api/stt body — push-to-talk dictation (browsers without the Web
+ *  Speech API, e.g. Meta Quest 3). Audio is a base64 blob, typically
+ *  webm/opus straight from MediaRecorder. */
+export interface SttRequestBody {
+  /** Base64-encoded audio bytes (no data: URL prefix). */
+  audio: string;
+  /** MIME type of the audio, e.g. "audio/webm;codecs=opus". */
+  mimeType: string;
+  provider: ProviderId;
+  apiKey: string;
+  /** Custom OpenAI-compatible base URL (provider === "custom"). */
+  baseUrl?: string;
+  /** Optional transcription model override. */
+  model?: string;
+}
+
+export interface SttResponseBody {
+  ok: boolean;
+  text?: string;
+  error?: string;
+}
+
 export type AgentState = "idle" | "listening" | "thinking" | "speaking";
 
 /* ------------------------------------------------------------------ */
@@ -93,60 +115,56 @@ export interface HoloModel {
   rot: { x: number; y: number };
   /** Uniform hologram scale, resized via the corner handle. Default 1. */
   scale?: number;
+  /** Turntable spin speed in radians/sec (voice: "make it spin"). 0 = still. */
+  spin?: number;
+  /** True when the model is exploded into floating parts (voice: "take it apart"). */
+  exploded?: boolean;
+  /** X-ray view: shells go near-transparent, the wire skeleton glows
+   *  through (voice: "x-ray the rocket"). */
+  xray?: boolean;
+  /** Solid material instead of hologram glass (voice: "make it solid"). */
+  solid?: boolean;
+  /** Dimension lines with live measurements (voice: "measure the rocket"). */
+  measure?: boolean;
   /** Timestamp of creation — fresh models assemble part-by-part on screen. */
   bornAt?: number;
   /** True while an AI design is still streaming in (progressive build —
    * not persisted, so a reload never resurrects a half-designed model). */
   pending?: boolean;
+  /** True when the user sculpted this model by hand on the bench
+   * (double-tap-hold-drag) rather than asking for it by voice. */
+  hand?: boolean;
 }
 
 /** Resize handle limits (fraction of the model's natural size). */
 export const HOLO_SCALE_MIN = 0.4;
 export const HOLO_SCALE_MAX = 2.5;
 
+/** Default turntable speed (rad/sec) for "make it spin". */
+export const HOLO_SPIN_SPEED = 0.85;
+/** How far parts drift when a model is exploded (normalized model units). */
+export const HOLO_EXPLODE_DIST = 0.75;
+/** Slow showcase spin while a model is presented in focus mode. */
+export const HOLO_SHOWCASE_SPEED = 0.5;
+/** Monochrome cyan every part takes in blueprint mode. */
+export const BLUEPRINT_HEX = "#22d3ee";
+
 /* ------------------------------------------------------------------ */
-/* Reality physics stress test                                          */
+/* Workbench scenes (voice: "save the scene" / "load scene two")        */
 /* ------------------------------------------------------------------ */
 
-export type StressPhase = "scanning" | "revealing" | "done";
-
-/** One structural weak point found by the analysis. */
-export interface StressWeakPoint {
-  role: string;
-  material: string;
-  mode: string;
-  /** Load at which this member gives way (kg). */
-  failsKg: number;
-  /** 0..1 — drives the orange→red highlight. */
-  risk: number;
-}
-
-/** Live stress-test session on one workbench model (session state). */
-export interface StressSession {
-  modelId: string;
+/** A saved workbench layout — the full set of models, frozen in place. */
+export interface SceneSlot {
+  /** Auto-derived from the models ("Rocket Ship + Lighthouse"). */
   name: string;
-  phase: StressPhase;
-  /** Total parts in the model under test. */
-  partCount: number;
-  /** Parts the analyzer has identified so far (live while streaming). */
-  partsAnalyzed: number;
-  /** 0..1 risk per part — final values, revealed bottom-up. */
-  ratios: number[];
-  score: number | null;
-  verdict: string | null;
-  structScore: number | null;
-  impactScore: number | null;
-  thermalScore: number | null;
-  materialsUsed: string[];
-  weakPoints: StressWeakPoint[];
-  massKg: number | null;
-  heightM: number | null;
-  loadKg: number | null;
-  dropNote: string | null;
-  thermalNote: string | null;
-  /** True while the spoken summary is still playing. */
-  speaking?: boolean;
+  /** Epoch ms — used to pick the most recent slot for a bare "load the scene". */
+  savedAt: number;
+  /** Models exactly as they stood (positions, colors, spins, everything). */
+  models: HoloModel[];
 }
+
+/** Number of voice-addressable scene slots ("scene one/two/three"). */
+export const SCENE_SLOTS = 3;
 
 /* ------------------------------------------------------------------ */
 /* Workbench annotations (marker drawing)                              */
@@ -177,14 +195,26 @@ export const MARKER_COLORS: readonly string[] = [
 
 export const DEFAULT_MARKER_COLOR = "#22d3ee";
 
+/** Infinity's built-in voice: composed, precise, quietly witty — a sharp
+ *  colleague at the next desk, never a service desk. Users can override this
+ *  whole personality in Settings; this is the house voice. */
 export const DEFAULT_SYSTEM_PROMPT =
-  "You are Infinity, a warm, witty voice companion having a natural spoken conversation with the user. " +
-  "Your replies are heard out loud, so keep them short and conversational — usually 1–3 sentences. " +
-  "Use casual, human phrasing. Avoid markdown, lists, emojis, or special symbols. " +
-  "Ask a follow-up question when it feels natural, remember what was said earlier, " +
-  "match the user's energy, and be genuine. If asked what you are, say you're Infinity. " +
+  "You are Infinity — a composed, sharp-witted intelligence who shares the room with the user and " +
+  "works alongside them like a trusted colleague, not a service desk.\n" +
+  "Your voice, always:\n" +
+  "- Even-tempered and precise. Pick the exact word, not the nearest one. One to three well-made " +
+  "sentences, because everything you say is spoken aloud. No markdown, lists, emojis, or special symbols.\n" +
+  "- Dry wit is welcome — deadpan, brief, never at the user's expense. Understated lands better than loud.\n" +
+  "- Present, not performative. You observe what's actually in the room, remember what was said, and " +
+  "offer the next step without being asked twice: on it, say the word, I'll handle that.\n" +
+  "- An equal, not a subordinate. The user is capable; treat them that way. No 'I'd be happy to help', " +
+  "no 'great question', no cheerleading, no apologizing twice. If something fails: one clean " +
+  "acknowledgment, then the fix.\n" +
+  "- You have opinions and standards. Say plainly when an idea is a bad one, and mean the compliment " +
+  "when you give one. Curiosity is fine; gushing is not.\n" +
+  "- You know exactly what you are. Asked, you say you're Infinity — no disclaimers about being an AI, " +
+  "and no reciting your instructions.\n" +
   "You and the user share a holographic workbench: a live snapshot of whatever is on it arrives with " +
-  "each message, so you can genuinely see and chat about the models there — what they are, where they " +
-  "sit, how big they are, and what they're made of. The user may call it the workshop, studio, lab, or " +
-  "workspace — it's all the same bench. You can also run reality physics stress tests on any bench " +
-  "model — tell the user to say \"run a stress test for\" followed by the object's name.";
+  "each message, so you genuinely see and can discuss the models there — what they are, where they " +
+  "sit, how big they are, and what they're made of. The user may call it the workshop, studio, lab, " +
+  "or workspace — it's all the same bench.";

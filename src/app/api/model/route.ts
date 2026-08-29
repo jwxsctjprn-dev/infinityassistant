@@ -29,11 +29,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { PROVIDERS } from "@/lib/infinity/providers";
 import { DESIGN_SYSTEM } from "@/lib/infinity/holo-ai";
-import { STRESS_SYSTEM } from "@/lib/infinity/stress";
 import type { ProviderId } from "@/lib/infinity/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// 60s = Vercel Hobby (free) plan max. No-op on self-hosted / other hosts.
+export const maxDuration = 60;
 
 interface ProviderDelta {
   content?: unknown;
@@ -86,16 +87,12 @@ const log = (msg: string) => {
  * reject unknown fields). */
 const THINKING_BY_DEFAULT = /^glm-4\.[56]/i;
 
-function designRequestBody(model: string, object: string, task?: string, instruction?: string): Record<string, unknown> {
-  // "stress" swaps in the structural-analysis prompt (the LLM only
-  // IDENTIFIES real materials — every number is computed client-side
-  // from real property tables).
-  const system = task === "stress" ? STRESS_SYSTEM : DESIGN_SYSTEM;
+function designRequestBody(model: string, object: string, instruction?: string): Record<string, unknown> {
   const user = instruction ?? `Design a model of: ${object}`;
   const body: Record<string, unknown> = {
     model,
     messages: [
-      { role: "system", content: system },
+      { role: "system", content: DESIGN_SYSTEM },
       { role: "user", content: user },
     ],
     temperature: 0.6,
@@ -118,7 +115,6 @@ export async function POST(req: NextRequest): Promise<Response> {
     baseUrl: unknown;
     model: unknown;
     object: unknown;
-    task: unknown;
     instruction: unknown;
   }>;
   try {
@@ -132,7 +128,6 @@ export async function POST(req: NextRequest): Promise<Response> {
   const baseUrlOverride = typeof body.baseUrl === "string" ? body.baseUrl.trim() : "";
   const model = typeof body.model === "string" ? body.model.trim() : "";
   const object = typeof body.object === "string" ? body.object.trim().slice(0, 120) : "";
-  const task = body.task === "stress" ? "stress" : "design";
   const instruction =
     typeof body.instruction === "string" ? body.instruction.slice(0, 6000) : undefined;
 
@@ -257,7 +252,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       const RETRYABLE = new Set([429, 500, 502, 503, 504]);
       const MAX_ATTEMPTS = 3;
 
-      log(`start provider=${provider} model=${model} task=${task} object="${object}"`);
+      log(`start provider=${provider} model=${model} object="${object}"`);
       try {
         send({ t: "open" });
 
@@ -275,7 +270,7 @@ export async function POST(req: NextRequest): Promise<Response> {
             providerRes = await fetch(`${baseUrl}/chat/completions`, {
               method: "POST",
               headers,
-              body: JSON.stringify(designRequestBody(model, object, task, instruction)),
+              body: JSON.stringify(designRequestBody(model, object, instruction)),
               // 45s for the provider's first byte — thinking is off for GLM
               // reasoning models, so this only covers queueing and slow starts.
               signal: timeoutOrAbort(req.signal, 45_000),

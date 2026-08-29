@@ -16,8 +16,10 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
     id: "zai",
     label: "Z.AI",
     baseUrl: "https://api.z.ai/api/paas/v4",
-    models: ["glm-4.6", "glm-4.5", "glm-4.5-air", "glm-4.5-flash", "glm-4-flash"],
-    defaultModel: "glm-4.6",
+    // Flash first: conversation is latency-sensitive — the flagship 4.6 is
+    // one click away in Settings for users who want depth over speed.
+    models: ["glm-4.5-flash", "glm-4.6", "glm-4.5", "glm-4.5-air", "glm-4-flash"],
+    defaultModel: "glm-4.5-flash",
     keyHint: "Z.AI API key",
     keyUrl: "https://z.ai/manage/apikey",
   },

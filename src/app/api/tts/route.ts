@@ -14,6 +14,8 @@ import type { TtsRequestBody } from "@/lib/infinity/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// 60s = Vercel Hobby (free) plan max. No-op on self-hosted / other hosts.
+export const maxDuration = 60;
 
 const DEFAULT_VOICE = "en-US-AriaNeural";
 const MAX_TEXT_LENGTH = 3_000;
@@ -54,23 +56,34 @@ function prunePool() {
 
 async function acquire(voice: string): Promise<Pooled | null> {
   prunePool();
-  let p = pool.find((x) => !x.busy);
+  const p = pool.find((x) => !x.busy);
   if (p) {
     p.busy = true;
-    if (p.voice !== voice) {
-      // Reconfigure the open socket for a different voice (no new handshake).
-      await p.tts.setMetadata(voice, FORMAT);
+    if (p.voice === voice) return p;
+    // Reconfigure the open socket for a different voice (no new handshake).
+    try {
+      await p.tts.setMetadata(voice, FORMAT, metadataOpts(voice));
       p.voice = voice;
       p.bornAt = Date.now();
+      return p;
+    } catch {
+      // Reconfigure failed — drop the entry (it must never stay marked busy)
+      // and fall through to a fresh connection below.
+      const i = pool.indexOf(p);
+      if (i >= 0) pool.splice(i, 1);
+      try {
+        p.tts.close();
+      } catch {
+        /* already dead */
+      }
     }
-    return p;
   }
   try {
     const tts = new MsEdgeTTS();
-    await tts.setMetadata(voice, FORMAT);
-    p = { tts, voice, busy: true, bornAt: Date.now() };
-    pool.push(p);
-    return p;
+    await tts.setMetadata(voice, FORMAT, metadataOpts(voice));
+    const entry: Pooled = { tts, voice, busy: true, bornAt: Date.now() };
+    pool.push(entry);
+    return entry;
   } catch {
     return null;
   }
@@ -108,6 +121,23 @@ function escapeXml(text: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+/**
+ * "en-US-AriaNeural" → "en-US" — the locale part of an Edge ShortName.
+ * msedge-tts 2.0.7 has a latent crash: when setMetadata is called WITHOUT a
+ * third argument on an instance that already has a voiceLocale set (i.e. any
+ * pooled/reconfigured connection), it reads `metadataOptions.voiceLocale`
+ * on `undefined` and throws. Always passing an explicit options object makes
+ * every call site safe — fresh, pooled, or reconfigured.
+ */
+function localeForVoice(voice: string): string {
+  const parts = voice.split("-");
+  return parts.length >= 2 ? `${parts[0]}-${parts[1]}` : voice;
+}
+
+function metadataOpts(voice: string) {
+  return { voiceLocale: localeForVoice(voice) };
 }
 
 /**
@@ -166,7 +196,7 @@ async function synthesize(voice: string, text: string, rate: number): Promise<Bu
 
   const tts = new MsEdgeTTS();
   try {
-    await tts.setMetadata(voice, FORMAT);
+    await tts.setMetadata(voice, FORMAT, metadataOpts(voice));
     return await collect(tts, text, rate);
   } finally {
     try {

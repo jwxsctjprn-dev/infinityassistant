@@ -28,6 +28,8 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// 60s = Vercel Hobby (free) plan max. No-op on self-hosted / other hosts.
+export const maxDuration = 60;
 
 interface ProviderChatResponse {
   choices?: { message?: { content?: unknown } }[];

@@ -6,7 +6,7 @@
  * from this file, so a bump here automatically updates the whole UI.
  */
 
-export const APP_VERSION = "2.1.1";
+export const APP_VERSION = "2.2.0";
 
 export interface Release {
   version: string;
@@ -18,6 +18,25 @@ export interface Release {
 
 /** Newest release first. */
 export const RELEASES: Release[] = [
+  {
+    version: "2.2.0",
+    date: "2026-08-30",
+    title: "The gesture update",
+    notes: [
+      "The Iron Man sandbox now reads TWENTY hand gestures — building in mixed reality is faster, snappier and a lot more fun on Quest 3 (desktop and mobile unchanged).",
+      "Force push: thrust an open palm forward and a holographic shockwave shoves every build in front of you away — with an expanding ring, thump and haptics.",
+      "Force pull: snap an open palm back toward your chest and the nearest build flies over to hover just off your palm, then catch it mid-air. Pure telekinesis.",
+      "Point & flick: point your index finger at a hologram (a live targeting ray glows from your fingertip) and flick — a precision nudge from across the room, with natural spin from the off-centre hit.",
+      "Two-hand scale & twist: grab ONE build with both fists and pull your hands apart to grow it, together to shrink it, or rotate them like a steering wheel to turn the whole thing. Works on any assembly, any size.",
+      "Double-tap clone: tap a hologram twice with a free index finger and a perfect copy pops out beside it — clone whole builds, colors and all.",
+      "Clap-crush: sandwich a build between both palms and clap — it implodes into sparks. The satisfying delete.",
+      "Stabilize: hold a still, open palm near a drifting build and it calms to a perfect stop (a charge ring shows the build settling) — perfect before snapping the next piece.",
+      "Shake to recolor: shake a held build and it sweeps through six hologram tints — cyan, pink, amber, green, violet, ice.",
+      "Scissors tumble: the ✌ gesture now also swipes UP or DOWN for a forward/backward tumble, alongside the existing left/right drift spin.",
+      "Hard-throw despawn: hurl a hologram hard and it sails off in a spark trail, shrinking away — throw your mistakes out of existence.",
+      "Snap assist: bringing a held piece near a flush face now adds a gentle magnetic pull, so LEGO connections click on the first try. Every gesture has its own synthesized sound, haptic pulse and particle/ring effect.",
+    ],
+  },
   {
     version: "2.1.1",
     date: "2026-08-29",

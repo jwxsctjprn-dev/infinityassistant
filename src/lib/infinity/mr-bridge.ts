@@ -1,5 +1,5 @@
 /**
- * Infinity — mixed-reality bridge (v2.1.1 "The Iron Man Sandbox").
+ * Infinity — mixed-reality bridge (v2.2.0 "The Gesture Update").
  *
  * The WebXR scene runs inside a three.js render loop that must never
  * re-render React on every frame; this tiny mutable singleton is the
@@ -49,6 +49,20 @@ export interface MrBridge {
     parts: number;
     clusters: number;
     partsList: Array<{ id: number; type: string; pos: [number, number, number] }>;
+    /** per-cluster bodies: part count, two-hand scale, tint index, velocity */
+    clustersList: Array<{
+      id: number;
+      parts: number;
+      scale: number;
+      tint: number;
+      dying: boolean;
+      summoned: boolean;
+      pos: [number, number, number];
+      vel: [number, number, number];
+      angVel: [number, number, number];
+    }>;
+    /** two-hand scale & twist gesture state */
+    twoHand: { active: boolean; scale: number };
     /** the palette panel's world up axis (part +Y at spawn) */
     palUp: [number, number, number];
     held: { left: boolean; right: boolean };
@@ -63,11 +77,24 @@ export interface MrBridge {
       fistR: boolean;
       scissorsL: boolean;
       scissorsR: boolean;
+      pointL: boolean;
+      pointR: boolean;
+      openL: boolean;
+      openR: boolean;
     };
     lastSpawnAt: number;
     lastSnapAt: number;
     lastRipAt: number;
     lastSpinAt: number;
+    lastPushAt: number;
+    lastPullAt: number;
+    lastFlickAt: number;
+    lastCloneAt: number;
+    lastCrushAt: number;
+    lastStabAt: number;
+    lastTintAt: number;
+    lastTumbleAt: number;
+    lastYeetAt: number;
     grabTrace: string;
     diag: {
       frame: number;

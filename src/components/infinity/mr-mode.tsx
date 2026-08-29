@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Infinity — Mixed Reality mode orchestrator, v2.1.1 "The Iron Man Sandbox".
+ * Infinity — Mixed Reality mode orchestrator, v2.2.0 "The Gesture Update".
  *
  * Owns the WebXR session lifecycle (request → active → end), the slim DOM
  * bar shown on flat screens (status + CLEAR + EXIT), and the fallback
@@ -9,7 +9,8 @@
  * preview of the same zero-gravity sandbox).
  *
  * Mixed reality is the AI-free sandbox: no orb, no conversation, no
- * captions — just floating holograms you pull out of your palm.
+ * captions — just floating holograms you pull out of your palm and
+ * sculpt with twenty hand gestures.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -191,7 +192,7 @@ export function MrMode({ onExit }: { onExit: () => void }) {
   const statusText =
     mode === "preview"
       ? "CLICK A SHAPE TO GRAB · CLICK A HOLOGRAM TO HOLD · X / WHEEL SPINS"
-      : "GRAB A SHAPE FROM YOUR PALM · SNAP FACES TOGETHER · ✌ SWIPE TO SPIN";
+      : "20 GESTURES: PINCH & RIP · FIST GRAB · ✌ SWIPE SPIN/TUMBLE · PALM THRUST PUSH · SNAP-PULL SUMMON · ☝ FLICK · TWO-HAND SCALE · TAP-TAP CLONE · PALM CLAP CRUSH · STILL PALM STABILIZE · SHAKE RECOLOR · HURL TO DESPAWN";
 
   return (
     <div className="fixed inset-0 z-50 select-none overflow-hidden bg-black text-zinc-100">
@@ -299,8 +300,9 @@ export function MrMode({ onExit }: { onExit: () => void }) {
             <DialogDescription className="text-left text-[13px] leading-relaxed text-zinc-400">
               A zero-gravity hologram playground in your room. Pull shapes out
               of a palette on your palm, let them float, snap them together
-              face-to-face like LEGO, and rip them back apart — no AI, just
-              you and whatever you build.
+              face-to-face like LEGO, and sculpt everything with twenty hand
+              gestures — force pushes, flicks, two-hand scaling, clones and
+              more. No AI, just you and whatever you build.
             </DialogDescription>
           </DialogHeader>
 
@@ -313,7 +315,8 @@ export function MrMode({ onExit }: { onExit: () => void }) {
             <li className="flex gap-2.5">
               <Square className="mt-0.5 h-3 w-3 shrink-0 text-sky-300/70" aria-hidden="true" />
               <span className="text-zinc-100">Meta hand tracking</span> puts the palette on your
-              palm — pinch a shape and pull it out.
+              palm — pinch a shape and pull it out, then build with twenty
+              hand gestures.
             </li>
             <li className="flex gap-2.5">
               <Square className="mt-0.5 h-3 w-3 shrink-0 text-sky-300/70" aria-hidden="true" />

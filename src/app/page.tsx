@@ -216,11 +216,11 @@ export default function Home() {
       {/* Hand-sculpting: double-tap-hold-drag on the bench draws blocks */}
       {gridVisible && <WorkbenchSculpt />}
 
-      {/* Mixed reality — the AI-free drafting table (Meta Quest 3) */}
+      {/* Mixed reality — the AI-free hologram sandbox (Meta Quest 3) */}
       <button
         type="button"
         aria-label="Enter the hologram sandbox in mixed reality (Quest 3)"
-        title="Holo Sandbox MR — pull holograms out of your palm (Quest 3)"
+        title="Holo Sandbox MR — build with 20 hand gestures (Quest 3)"
         onClick={() => {
           if (agent.sessionActive) agent.stop();
           setMrActive(true);

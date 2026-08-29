@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Infinity — Mixed Reality scene, v2.1.1 "The Iron Man Sandbox".
+ * Infinity — Mixed Reality scene, v2.2.0 "The Gesture Update".
  *
  * A zero-gravity hologram playground in passthrough. No desk, no grid,
  * no AI — just you and whatever you build, floating in your room:
@@ -16,8 +16,29 @@
  *   • LEGO SNAPPING — bring a held hologram face-to-face with another
  *     and they click flush and aligned, becoming ONE rigid piece.
  *     Grab any piece of a build and physically RIP it back apart.
- *   • SCISSORS SPIN — ✌ gesture + swipe left/right gives a hologram a
- *     set quarter-turn of drift physics.
+ *
+ * THE GESTURE PACK (twenty ways to touch the holograms):
+ *   • SCISSORS SPIN — ✌ + swipe left/right: set quarter-turn of drift.
+ *   • SCISSORS TUMBLE — ✌ + swipe up/down: forward/backward tumble.
+ *   • FORCE PUSH — open palm thrust: a shockwave shoves everything in
+ *     a cone in front of the hand.
+ *   • FORCE PULL — open palm snapped back toward you: the nearest
+ *     build flies over and hovers just off the palm (catchable).
+ *   • POINT & FLICK — point at a hologram and flick: precision
+ *     telekinesis nudge at range, with a live targeting ray.
+ *   • TWO-HAND SCALE & TWIST — grab one build with both fists: pull
+ *     the hands apart to grow it, together to shrink it, and rotate
+ *     them like a steering wheel to turn the whole build.
+ *   • DOUBLE-TAP CLONE — tap a hologram twice with a free index
+ *     finger: a perfect copy pops out beside it.
+ *   • CLAP-CRUSH — sandwich a build between both palms and clap: it
+ *     implodes into sparks.
+ *   • STABILIZE — hold a still, open palm near a drifting build: it
+ *     calms down to a perfect stop.
+ *   • SHAKE TO RECOLOR — shake a held build: it cycles through the
+ *     hologram tints.
+ *   • HARD-THROW DESPAWN — hurl a hologram hard: it sails off in a
+ *     spark trail and dissolves.
  *   • EXIT — the only UI is the palette itself: pinch & hold EXIT.
  *
  * Everything that made v2.0.2–v2.1 resilient is kept: the immortal XR
@@ -37,7 +58,7 @@ import {
 import { MR_CYAN, MR_ICE, MR_SKY, mrBridge } from "@/lib/infinity/mr-bridge";
 
 /** Deployment verification marker (grep live bundles for this). */
-const SANDBOX_BUILD = "v2.1.1-ironman-sandbox";
+const SANDBOX_BUILD = "v2.2.0-gesture-pack";
 
 /* ------------------------------------------------------------------ */
 /* Tuning constants                                                     */
@@ -73,6 +94,66 @@ const SWIPE_WINDOW = 0.26;
 const SWIPE_COOLDOWN = 0.5;
 /** Spin impulse for a swipe (rad/s ≈ a quarter turn with drift settle). */
 const SPIN_IMPULSE = 3.4;
+/** Scissors tumble: vertical swipe impulse (rad/s, around camera-right). */
+const TUMBLE_DIST = 0.16;
+const TUMBLE_IMPULSE = 3.8;
+
+/** Point ☝ (index out, the rest curled). */
+const POINT_EXT = 0.07;
+const POINT_CURL = 0.062;
+/** Point & flick telekinesis. */
+const FLICK_SPEED = 1.65;
+const FLICK_COOLDOWN = 0.38;
+const FLICK_RANGE = 3.2;
+
+/** Force push: open-palm thrust along the palm normal. */
+const PUSH_SPEED = 1.35;
+const PUSH_RANGE = 1.8;
+const PUSH_CONE = 0.72;
+const PUSH_COOLDOWN = 0.65;
+/** Force pull: open palm snapped back toward the chest. */
+const PULL_SPEED = 1.05;
+const PULL_RANGE = 2.4;
+const PULL_COOLDOWN = 0.9;
+const PULL_HOVER = 0.3; // summoned build hovers this far off the palm
+const PULL_MS = 1100; // summon steering duration
+
+/** Two-hand scale & twist (both fists on ONE build). */
+const SCALE_MIN = 0.35;
+const SCALE_MAX = 2.6;
+
+/** Double-tap clone (free index fingertip). */
+const TAP_RADIUS = 0.075;
+const TAP_GAP_MS = 800;
+const TAP_MAX_SPEED = 1.0;
+
+/** Clap-crush: sandwich a build between both palms and clap. */
+const CLAP_NEAR = 0.22;
+const CLAP_MID = 0.17;
+const CLAP_CLOSE = 0.9; // converging speed (m/s)
+const CLAP_COOLDOWN = 0.7;
+
+/** Stabilize: a still, open palm calms a nearby drifting build. */
+const STAB_DIST = 0.14;
+const STAB_HOLD_S = 0.4;
+const STAB_COOLDOWN = 0.8;
+
+/** Shake-to-recolor a held build. */
+const SHAKE_WINDOW_MS = 700;
+const SHAKE_FLIPS = 3;
+const SHAKE_SPEED = 0.55;
+
+/** Hard-throw despawn (release speed above this = dissolve in flight). */
+const YEET_SPEED = 3.3;
+const YEET_MS = 0.45;
+/** Clap-crush implode duration. */
+const CRUSH_MS = 0.26;
+
+/** Magnetic snap assist (acceleration toward a near-flush face). */
+const MAGNET_ACC = 5.5;
+
+/** Hologram tints (shake a held build to cycle). */
+const TINTS = ["#67e8f9", "#f472b6", "#fbbf24", "#4ade80", "#a78bfa", "#e2e8f0"];
 
 /** Grab spheres. */
 const GRAB_R_PINCH = 0.055;
@@ -284,6 +365,10 @@ for (let cy = 0; cy < 2; cy++) {
 /** The hologram colour — identical to the flat workbench blocks. */
 const HOLO_COLOR = "#67e8f9";
 
+const tmpColor = new THREE.Color();
+const Y_AXIS = new THREE.Vector3(0, 1, 0);
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
+
 function easeOutBack(x: number): number {
   const c1 = 1.70158;
   const c3 = c1 + 1;
@@ -351,9 +436,38 @@ interface Cluster {
   mass: number;
   /** settle animation freezes motion briefly after a snap */
   settleT: number;
+  /** uniform body scale (two-hand scale gesture) */
+  scale: number;
+  /** shake-to-recolor state */
+  tintIdx: number;
+  tintMix: number;
+  tintFrom: THREE.Color;
+  tintTo: THREE.Color;
+  /** stabilize charge (fed by a still palm, decays otherwise) */
+  stabT: number;
+  stabCdUntil: number;
+  /** imploding / dissolving — removed when the timer runs out */
+  dying: { t: number; dur: number; thrown: boolean } | null;
+  /** force-pull steering target (hand palm + PULL_HOVER) */
+  summon: { target: THREE.Vector3; until: number; side: HandSide } | null;
 }
 
-type SandboxEvent = "spawn" | "snap" | "rip" | "spin" | "release" | "full";
+type SandboxEvent =
+  | "spawn"
+  | "snap"
+  | "rip"
+  | "spin"
+  | "release"
+  | "full"
+  | "push"
+  | "pull"
+  | "flick"
+  | "clone"
+  | "crush"
+  | "stab"
+  | "tint"
+  | "tumble"
+  | "yeet";
 type HandSide = "left" | "right";
 
 interface Hold {
@@ -369,6 +483,9 @@ interface Hold {
   recentUntil: number;
   /** holding the palette EXIT button */
   exit: boolean;
+  /** shake-to-recolor recognizer */
+  shake: { lastDir: number; flips: number[] };
+  tintCdUntil: number;
 }
 
 interface HandRt {
@@ -377,13 +494,24 @@ interface HandRt {
   pinch: { active: boolean; point: THREE.Vector3; selectActive: boolean };
   fist: boolean;
   scissors: boolean;
+  /** ☝ index out, the rest curled */
+  point: boolean;
+  /** nothing pinched, curled, scissored or pointed — a free open hand */
+  open: boolean;
   palm: { center: THREE.Vector3; normal: THREE.Vector3; fwd: THREE.Vector3; valid: boolean };
   grabActive: boolean;
   grabPoint: THREE.Vector3;
   /** collider spheres: palm + fingertip cluster */
   colPalm: { pos: THREE.Vector3; prev: THREE.Vector3; vel: THREE.Vector3; seen: boolean };
   colTip: { pos: THREE.Vector3; prev: THREE.Vector3; vel: THREE.Vector3; seen: boolean };
+  /** index fingertip tracker (flicks + clone taps) */
+  tip: { pos: THREE.Vector3; prev: THREE.Vector3; vel: THREE.Vector3; seen: boolean };
   swipe: { samples: Array<{ t: number; x: number; y: number; z: number }>; cooldownUntil: number };
+  pushCdUntil: number;
+  pullCdUntil: number;
+  flickCdUntil: number;
+  /** double-tap clone recognizer */
+  taps: { cluster: Cluster | null; inside: boolean; at: number };
 }
 
 interface PaletteRt {
@@ -436,7 +564,35 @@ interface Rt {
   fpsAt: number;
   fpsFrames: number;
   cmdSeen: number;
-  last: { spawn: number; snap: number; rip: number; spin: number };
+  last: {
+    spawn: number;
+    snap: number;
+    rip: number;
+    spin: number;
+    push: number;
+    pull: number;
+    flick: number;
+    clone: number;
+    crush: number;
+    stab: number;
+    tint: number;
+    tumble: number;
+    yeet: number;
+  };
+  /** two-hand scale & twist state */
+  twoHand: {
+    active: boolean;
+    cluster: Cluster | null;
+    startDist: number;
+    startScale: number;
+    startDir: THREE.Vector3;
+    startQuat: THREE.Quaternion;
+    startPos: THREE.Vector3;
+    startMid: THREE.Vector3;
+    midPrev: THREE.Vector3;
+    midVel: THREE.Vector3;
+  };
+  clapCdUntil: number;
   /** dev trace of the last attemptGrab decision */
   grabTrace: string;
   debugAt: number;
@@ -458,6 +614,8 @@ function makeHold(): Hold {
     recent: null,
     recentUntil: 0,
     exit: false,
+    shake: { lastDir: 0, flips: [] },
+    tintCdUntil: 0,
   };
 }
 
@@ -468,6 +626,8 @@ function makeHandRt(): HandRt {
     pinch: { active: false, point: new THREE.Vector3(), selectActive: false },
     fist: false,
     scissors: false,
+    point: false,
+    open: false,
     palm: {
       center: new THREE.Vector3(),
       normal: new THREE.Vector3(0, 1, 0),
@@ -478,7 +638,12 @@ function makeHandRt(): HandRt {
     grabPoint: new THREE.Vector3(),
     colPalm: { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), seen: false },
     colTip: { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), seen: false },
+    tip: { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), seen: false },
     swipe: { samples: [], cooldownUntil: 0 },
+    pushCdUntil: 0,
+    pullCdUntil: 0,
+    flickCdUntil: 0,
+    taps: { cluster: null, inside: false, at: 0 },
   };
 }
 
@@ -530,7 +695,34 @@ function makeRt(): Rt {
     fpsAt: 0,
     fpsFrames: 0,
     cmdSeen: 0,
-    last: { spawn: 0, snap: 0, rip: 0, spin: 0 },
+    last: {
+      spawn: 0,
+      snap: 0,
+      rip: 0,
+      spin: 0,
+      push: 0,
+      pull: 0,
+      flick: 0,
+      clone: 0,
+      crush: 0,
+      stab: 0,
+      tint: 0,
+      tumble: 0,
+      yeet: 0,
+    },
+    twoHand: {
+      active: false,
+      cluster: null,
+      startDist: 1,
+      startScale: 1,
+      startDir: new THREE.Vector3(1, 0, 0),
+      startQuat: new THREE.Quaternion(),
+      startPos: new THREE.Vector3(),
+      startMid: new THREE.Vector3(),
+      midPrev: new THREE.Vector3(),
+      midVel: new THREE.Vector3(),
+    },
+    clapCdUntil: 0,
     grabTrace: "",
     debugAt: 0,
     vPoint: { pos: new THREE.Vector3(0, 1.3, -0.3), prev: new THREE.Vector3(), vel: new THREE.Vector3(), seen: false },
@@ -705,6 +897,38 @@ const mrAudio = {
   },
   spin(): void {
     this.noise(0.2, 380, 1500, 0.3);
+  },
+  push(): void {
+    this.blip(140, 60, 0.18, "sine", 0.55);
+    this.noise(0.16, 300, 90, 0.35);
+  },
+  pull(): void {
+    this.blip(180, 520, 0.22, "sine", 0.4);
+  },
+  flick(): void {
+    this.blip(900, 1400, 0.05, "square", 0.2);
+  },
+  clone(): void {
+    this.blip(520, 660, 0.05, "triangle", 0.4);
+    this.blip(780, 990, 0.06, "triangle", 0.35, 0.06);
+  },
+  crush(): void {
+    this.noise(0.28, 2200, 120, 0.6);
+    this.blip(320, 60, 0.22, "sawtooth", 0.4);
+  },
+  stab(): void {
+    this.blip(700, 700, 0.08, "sine", 0.3);
+    this.blip(1050, 1050, 0.1, "sine", 0.22, 0.05);
+  },
+  tint(): void {
+    this.blip(440, 880, 0.12, "triangle", 0.32);
+  },
+  tumble(): void {
+    this.noise(0.24, 300, 900, 0.32);
+  },
+  yeet(): void {
+    this.noise(0.3, 600, 1800, 0.35);
+    this.blip(600, 200, 0.25, "sawtooth", 0.3);
   },
   exitTick(p: number): void {
     this.blip(620 + p * 420, 620 + p * 420, 0.03, "square", 0.16);
@@ -975,6 +1199,86 @@ class ParticleSystem {
 }
 
 /* ------------------------------------------------------------------ */
+/* Ring effects — pooled expanding/imploding holo rings                 */
+/* ------------------------------------------------------------------ */
+
+const ringFxGeo = new THREE.TorusGeometry(1, 0.02, 8, 40);
+
+class RingFx {
+  private slots: Array<{
+    mesh: THREE.Mesh;
+    mat: THREE.MeshBasicMaterial;
+    life: number;
+    dur: number;
+    from: number;
+    to: number;
+  }>;
+
+  constructor(scene: THREE.Object3D, n = 7) {
+    this.slots = [];
+    for (let i = 0; i < n; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: MR_ICE,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(ringFxGeo, mat);
+      mesh.visible = false;
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 6;
+      scene.add(mesh);
+      this.slots.push({ mesh, mat, life: 0, dur: 1, from: 0.05, to: 0.5 });
+    }
+  }
+
+  spawn(
+    at: THREE.Vector3,
+    quat: THREE.Quaternion,
+    from: number,
+    to: number,
+    dur: number,
+    color: string = MR_ICE
+  ): void {
+    let slot = this.slots.find((s) => s.life <= 0);
+    if (!slot) slot = this.slots[0];
+    slot.life = dur;
+    slot.dur = dur;
+    slot.from = from;
+    slot.to = to;
+    slot.mesh.position.copy(at);
+    slot.mesh.quaternion.copy(quat);
+    slot.mesh.scale.setScalar(Math.max(0.001, from));
+    slot.mesh.visible = true;
+    slot.mat.color.set(color);
+  }
+
+  update(dt: number): void {
+    for (const s of this.slots) {
+      if (s.life <= 0) continue;
+      s.life -= dt;
+      if (s.life <= 0) {
+        s.mesh.visible = false;
+        continue;
+      }
+      const k = 1 - s.life / s.dur;
+      const e = 1 - Math.pow(1 - k, 3);
+      s.mesh.scale.setScalar(Math.max(0.001, s.from + (s.to - s.from) * e));
+      s.mat.opacity = 0.85 * (1 - k);
+    }
+  }
+
+  dispose(): void {
+    for (const s of this.slots) {
+      s.mesh.removeFromParent();
+      s.mat.dispose();
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Sandbox — parts, clusters, zero-G physics, snapping                  */
 /* ------------------------------------------------------------------ */
 
@@ -1025,7 +1329,7 @@ class Sandbox {
   partWorld(part: Part, outPos: THREE.Vector3, outQuat: THREE.Quaternion): void {
     const c = part.cluster;
     outQuat.copy(c.quat).multiply(part.offQ);
-    outPos.copy(part.off).applyQuaternion(c.quat).add(c.pos);
+    outPos.copy(part.off).multiplyScalar(c.scale).applyQuaternion(c.quat).add(c.pos);
   }
 
   spawn(
@@ -1049,6 +1353,15 @@ class Sandbox {
       angVel: new THREE.Vector3(),
       mass: 1,
       settleT: 0,
+      scale: 1,
+      tintIdx: 0,
+      tintMix: 1,
+      tintFrom: new THREE.Color(HOLO_COLOR),
+      tintTo: new THREE.Color(HOLO_COLOR),
+      stabT: 0,
+      stabCdUntil: 0,
+      dying: null,
+      summon: null,
     };
     const group = new THREE.Group();
     const fill = new THREE.MeshStandardMaterial({
@@ -1119,8 +1432,9 @@ class Sandbox {
     let best: Part | null = null;
     let bestD = Infinity;
     for (const p of this.parts) {
+      if (p.cluster.dying) continue;
       this.partWorld(p, this.sv1, this.sq1);
-      const d = this.sv1.distanceTo(point) - SHAPE_BY_ID.get(p.type)!.bound;
+      const d = this.sv1.distanceTo(point) - SHAPE_BY_ID.get(p.type)!.bound * p.cluster.scale;
       if (d < radius && d < bestD) {
         best = p;
         bestD = d;
@@ -1191,6 +1505,15 @@ class Sandbox {
       ),
       mass: 1,
       settleT: 0,
+      scale: old.scale,
+      tintIdx: old.tintIdx,
+      tintMix: 1,
+      tintFrom: old.tintTo.clone(),
+      tintTo: old.tintTo.clone(),
+      stabT: 0,
+      stabCdUntil: 0,
+      dying: null,
+      summon: null,
     };
     part.cluster = fresh;
     part.off.set(0, 0, 0);
@@ -1206,6 +1529,194 @@ class Sandbox {
     this.onEvent("release", part.cluster.pos, side);
   }
 
+  /** Clone an entire cluster (double-tap gesture). */
+  cloneCluster(c: Cluster, pos: THREE.Vector3, side?: HandSide): Cluster | null {
+    if (this.parts.length + c.parts.length > MAX_PARTS) {
+      this.onEvent("full", pos, side);
+      return null;
+    }
+    if (c.dying) return null;
+    const fresh: Cluster = {
+      id: ++this.clusterSeq,
+      parts: [],
+      pos: pos.clone(),
+      vel: new THREE.Vector3(),
+      quat: c.quat.clone(),
+      angVel: new THREE.Vector3(
+        (Math.random() - 0.5) * 0.8,
+        (Math.random() - 0.5) * 0.8,
+        (Math.random() - 0.5) * 0.8
+      ),
+      mass: c.parts.length,
+      settleT: 0,
+      scale: c.scale,
+      tintIdx: c.tintIdx,
+      tintMix: 1,
+      tintFrom: c.tintTo.clone(),
+      tintTo: c.tintTo.clone(),
+      stabT: 0,
+      stabCdUntil: 0,
+      dying: null,
+      summon: null,
+    };
+    for (const p of c.parts) {
+      const shape = SHAPE_BY_ID.get(p.type)!;
+      const group = new THREE.Group();
+      const fill = new THREE.MeshStandardMaterial({
+        color: p.fill.color.clone(),
+        emissive: p.fill.emissive.clone(),
+        emissiveIntensity: 0.32,
+        transparent: true,
+        opacity: 0.15,
+        roughness: 0.35,
+        metalness: 0.1,
+        depthWrite: false,
+      });
+      const wire = new THREE.MeshBasicMaterial({
+        color: p.wire.color.clone(),
+        transparent: true,
+        opacity: 0.6,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const solid = new THREE.Mesh(shape.geo, fill);
+      const shell = new THREE.LineSegments(shape.wire, wire);
+      shell.scale.setScalar(1.004);
+      group.add(solid, shell);
+      group.scale.setScalar(0.001);
+      this.root.add(group);
+      const np: Part = {
+        id: ++this.seq,
+        type: p.type,
+        cluster: fresh,
+        off: p.off.clone(),
+        offQ: p.offQ.clone(),
+        rOff: p.off.clone(),
+        rOffQ: p.offQ.clone(),
+        group,
+        fill,
+        wire,
+        glow: 0,
+        glowTarget: 0,
+        held: false,
+        born: performance.now(),
+        snapCooldownUntil: 0,
+        settle: null,
+      };
+      fresh.parts.push(np);
+      this.parts.push(np);
+    }
+    this.clusters.push(fresh);
+    this.onCount(this.parts.length);
+    this.onEvent("clone", pos, side);
+    return fresh;
+  }
+
+  /** Start a cluster dying (clap-crush or hard-throw). */
+  killCluster(c: Cluster, thrown: boolean): void {
+    if (c.dying) return;
+    const dur = thrown ? YEET_MS : CRUSH_MS;
+    c.dying = { t: dur, dur, thrown };
+    c.summon = null;
+    c.stabT = 0;
+    c.angVel.add(
+      new THREE.Vector3(
+        (Math.random() - 0.5) * 2,
+        (Math.random() - 0.5) * 2,
+        (Math.random() - 0.5) * 2
+      )
+    );
+    this.onEvent(thrown ? "yeet" : "crush", c.pos);
+  }
+
+  /** Advance a cluster's hologram tint (shake gesture). */
+  recolorCluster(c: Cluster, side?: HandSide): void {
+    c.tintIdx = (c.tintIdx + 1) % TINTS.length;
+    c.tintFrom.copy(c.tintTo);
+    c.tintTo.set(TINTS[c.tintIdx]);
+    c.tintMix = 0;
+    this.onEvent("tint", c.pos, side);
+  }
+
+  /** Force push: cone impulse away from an open palm. */
+  forcePush(from: THREE.Vector3, dir: THREE.Vector3, side?: HandSide): number {
+    let hits = 0;
+    for (const c of this.clusters) {
+      if (c.dying) continue;
+      this.sv1.copy(c.pos).sub(from);
+      const d = this.sv1.length();
+      if (d > PUSH_RANGE || d < 1e-4) continue;
+      this.sv1.multiplyScalar(1 / d);
+      const facing = this.sv1.dot(dir);
+      if (facing < PUSH_CONE) continue;
+      const power = (1 - d / PUSH_RANGE) * 2.6 + 0.35;
+      c.vel.addScaledVector(dir, power * 0.75);
+      c.vel.addScaledVector(this.sv1, power * 0.35);
+      c.angVel.x += (Math.random() - 0.5) * 1.2;
+      c.angVel.y += (Math.random() - 0.5) * 1.2;
+      if (c.vel.length() > MAX_VEL) c.vel.setLength(MAX_VEL);
+      if (c.angVel.length() > MAX_ANG) c.angVel.setLength(MAX_ANG);
+      hits++;
+    }
+    this.onEvent("push", from, side);
+    return hits;
+  }
+
+  /** Force pull: summon the nearest in-cone cluster toward the palm. */
+  forcePullNearest(
+    from: THREE.Vector3,
+    dir: THREE.Vector3,
+    target: THREE.Vector3,
+    side?: HandSide
+  ): Cluster | null {
+    let best: Cluster | null = null;
+    let bestScore = -1;
+    for (const c of this.clusters) {
+      if (c.dying || c.summon) continue;
+      this.sv1.copy(c.pos).sub(from);
+      const d = this.sv1.length();
+      if (d > PULL_RANGE || d < 0.25) continue;
+      this.sv1.multiplyScalar(1 / d);
+      const facing = this.sv1.dot(dir);
+      if (facing < 0.55) continue;
+      const score = facing * 2 - d / PULL_RANGE;
+      if (score > bestScore) {
+        bestScore = score;
+        best = c;
+      }
+    }
+    if (!best) return null;
+    best.summon = { target: target.clone(), until: performance.now() + PULL_MS, side: side ?? "right" };
+    best.stabT = 0;
+    this.onEvent("pull", best.pos, side);
+    return best;
+  }
+
+  /** Point & flick telekinesis: impulse at the ray-hit point. */
+  flick(c: Cluster, tipVel: THREE.Vector3, hit: THREE.Vector3, side?: HandSide): void {
+    const speed = tipVel.length();
+    if (speed < 1e-4) return;
+    this.sv1.copy(tipVel).multiplyScalar(1 / speed);
+    const power = 1.15 * Math.min(1.4, speed / FLICK_SPEED);
+    c.vel.addScaledVector(this.sv1, power);
+    this.sv2.copy(hit).sub(c.pos);
+    this.sv3.crossVectors(this.sv2, this.sv1).multiplyScalar(2.2);
+    c.angVel.add(this.sv3);
+    if (c.vel.length() > MAX_VEL) c.vel.setLength(MAX_VEL);
+    if (c.angVel.length() > MAX_ANG) c.angVel.setLength(MAX_ANG);
+    c.summon = null;
+    this.onEvent("flick", hit, side);
+  }
+
+  /** Stabilize: calm a cluster to a dead stop. */
+  stabilize(c: Cluster, side?: HandSide): void {
+    c.vel.multiplyScalar(0.04);
+    c.angVel.multiplyScalar(0.03);
+    c.summon = null;
+    c.stabCdUntil = performance.now() + STAB_COOLDOWN * 1000;
+    this.onEvent("stab", c.pos, side);
+  }
+
   /**
    * Best face-pair snap candidate for `part` against every other cluster.
    * Also writes snap-proximity glow onto near target parts.
@@ -1213,6 +1724,7 @@ class Sandbox {
   snapSearch(part: Part, tight: boolean): SnapCandidate | null {
     const mShape = SHAPE_BY_ID.get(part.type)!;
     if (mShape.faces.length === 0) return null;
+    if (part.cluster.dying) return null;
     // a freshly ripped part must fly clear before it can snap again
     if (performance.now() < part.snapCooldownUntil) return null;
     const mc = part.cluster;
@@ -1226,6 +1738,7 @@ class Sandbox {
     let bestScore = maxLat * 2 + maxAlong;
     for (const tc of this.clusters) {
       if (tc === mc) continue;
+      if (tc.dying) continue;
       for (const t of tc.parts) {
         const tShape = SHAPE_BY_ID.get(t.type)!;
         if (tShape.faces.length === 0) continue;
@@ -1234,10 +1747,10 @@ class Sandbox {
         this.partWorld(t, tp, tq);
         for (const tf of tShape.faces) {
           // target face world centre + normal (sv3/sv4 persist over mf loop)
-          const tfc = this.sv3.copy(tf.c).applyQuaternion(tq).add(tp);
+          const tfc = this.sv3.copy(tf.c).multiplyScalar(tc.scale).applyQuaternion(tq).add(tp);
           const tfn = this.sv4.copy(tf.n).applyQuaternion(tq);
           for (const mf of mShape.faces) {
-            const mfc = this.sv5.copy(mf.c).applyQuaternion(mq).add(mp);
+            const mfc = this.sv5.copy(mf.c).multiplyScalar(mc.scale).applyQuaternion(mq).add(mp);
             const mfn = this.sv6.copy(mf.n).applyQuaternion(mq);
             const dot = mfn.dot(tfn);
             if (dot > SNAP_DOT) continue;
@@ -1280,7 +1793,7 @@ class Sandbox {
     const tq = this.sq2.clone();
     this.partWorld(t, tp, tq);
     // target face world
-    const tfc = this.sv3.copy(cand.tf.c).applyQuaternion(tq).add(tp);
+    const tfc = this.sv3.copy(cand.tf.c).multiplyScalar(tc.scale).applyQuaternion(tq).add(tp);
     const tfn = this.sv4.copy(cand.tf.n).applyQuaternion(tq);
     // align: rotate m so mf.n → -tfn
     const mfn = this.sv5.copy(cand.mf.n).applyQuaternion(mq);
@@ -1303,7 +1816,9 @@ class Sandbox {
       }
     }
     // desired m world position: face centres coincide, flush
-    const mPos = this.sv7.copy(tfc).sub(this.sv8.copy(cand.mf.c).applyQuaternion(bestQ));
+    const mPos = this.sv7
+      .copy(tfc)
+      .sub(this.sv8.copy(cand.mf.c).multiplyScalar(mc.scale).applyQuaternion(bestQ));
     // whole-cluster transform: rotate around pivot tfc by R = bestQ * mq⁻¹
     const R = bestQ.clone().multiply(mq.clone().invert());
     const delta = this.sv8
@@ -1319,12 +1834,12 @@ class Sandbox {
       const pQuat = this.sq3.clone();
       this.partWorld(p, pPos, pQuat);
       // old world pose in tc frame (settle "from")
-      const fromOff = pPos.clone().sub(tp).applyQuaternion(invTQ);
+      const fromOff = pPos.clone().sub(tp).applyQuaternion(invTQ).divideScalar(tc.scale);
       const fromOffQ = invTQ.clone().multiply(pQuat);
       // new world pose: rotate around pivot + delta
       const newPos = this.sv6.copy(pPos).sub(tfc).applyQuaternion(R).add(tfc).add(delta);
       const newQuat = R.clone().multiply(pQuat);
-      p.off.copy(newPos).sub(tp).applyQuaternion(invTQ);
+      p.off.copy(newPos).sub(tp).applyQuaternion(invTQ).divideScalar(tc.scale);
       p.offQ.copy(invTQ).multiply(newQuat);
       p.cluster = tc;
       p.settle = { fromOff, fromOffQ, t: SETTLE_MS };
@@ -1392,9 +1907,10 @@ class Sandbox {
     for (const c of this.clusters) {
       if (skipPart && c === skipPart.cluster) continue;
       if (softSkip && c === softSkip.cluster) continue;
+      if (c.dying) continue;
       for (const p of c.parts) {
         this.partWorld(p, this.sv1, this.sq1);
-        const bound = SHAPE_BY_ID.get(p.type)!.bound;
+        const bound = SHAPE_BY_ID.get(p.type)!.bound * c.scale;
         this.sv2.copy(this.sv1).sub(pos);
         const d = this.sv2.length();
         const rr = radius + bound * 0.85;
@@ -1421,11 +1937,19 @@ class Sandbox {
     }
   }
 
-  /** Scissors-spin the nearest cluster to `point`. */
-  rotateNearest(point: THREE.Vector3, sign: number, maxDist = 0.6, side?: HandSide): boolean {
+  /** Spin/tumble the nearest cluster to `point` around `axis`. */
+  rotateNearest(
+    point: THREE.Vector3,
+    axis: THREE.Vector3,
+    impulse: number,
+    maxDist = 0.85,
+    side?: HandSide,
+    kind: "spin" | "tumble" = "spin"
+  ): boolean {
     let best: Cluster | null = null;
     let bestD = maxDist;
     for (const c of this.clusters) {
+      if (c.dying) continue;
       const d = c.pos.distanceTo(point);
       if (d < bestD) {
         best = c;
@@ -1433,11 +1957,11 @@ class Sandbox {
       }
     }
     if (!best) return false;
-    best.angVel.y += sign * SPIN_IMPULSE;
+    best.angVel.addScaledVector(axis, impulse);
     best.angVel.x += (Math.random() - 0.5) * 0.5;
     best.angVel.z += (Math.random() - 0.5) * 0.5;
     if (best.angVel.length() > MAX_ANG) best.angVel.setLength(MAX_ANG);
-    this.onEvent("spin", best.pos, side);
+    this.onEvent(kind, best.pos, side);
     return true;
   }
 
@@ -1445,7 +1969,34 @@ class Sandbox {
   integrate(dt: number, headPos: THREE.Vector3): void {
     const linK = Math.exp(-LIN_DAMP * dt);
     const angK = Math.exp(-ANG_DAMP * dt);
+    const nowMs = performance.now();
+    const dead: Cluster[] = [];
     for (const c of this.clusters) {
+      // tint sweep (shake-to-recolor)
+      if (c.tintMix < 1) c.tintMix = Math.min(1, c.tintMix + dt * 4);
+      if (c.dying) {
+        c.dying.t -= dt;
+        if (c.dying.thrown && Math.random() < dt * 30) {
+          this.particles.burst(c.pos, 1, 0.1, 0.0022);
+        }
+        if (c.dying.t <= 0) {
+          dead.push(c);
+          continue;
+        }
+      } else if (c.summon) {
+        if (nowMs > c.summon.until) {
+          c.summon = null;
+        } else {
+          // velocity steering: glide to the palm hover point, no overshoot
+          this.sv1.copy(c.summon.target).sub(c.pos);
+          const d = this.sv1.length();
+          if (d > 1e-4) this.sv1.multiplyScalar(1 / d);
+          const want = Math.min(d * 3.5, 3.0);
+          this.sv2.copy(this.sv1).multiplyScalar(want);
+          c.vel.lerp(this.sv2, 1 - Math.exp(-9 * dt));
+          c.angVel.multiplyScalar(Math.exp(-5 * dt));
+        }
+      }
       c.vel.multiplyScalar(linK);
       c.angVel.multiplyScalar(angK);
       // soft keep-in-play spring toward the user
@@ -1470,6 +2021,15 @@ class Sandbox {
         c.quat.premultiply(this.sq1).normalize();
       }
     }
+    // fully dissolved clusters leave the world
+    if (dead.length) {
+      for (const c of dead) {
+        for (const p of c.parts.slice()) this.disposePart(p);
+        const k = this.clusters.indexOf(c);
+        if (k >= 0) this.clusters.splice(k, 1);
+      }
+      this.onCount(this.parts.length);
+    }
   }
 
   /** Push render transforms + material glow from physics state. */
@@ -1492,14 +2052,24 @@ class Sandbox {
         p.rOff.copy(p.off);
         p.rOffQ.copy(p.offQ);
       }
-      p.group.position.copy(p.rOff).applyQuaternion(c.quat).add(c.pos);
+      p.group.position.copy(p.rOff).multiplyScalar(c.scale).applyQuaternion(c.quat).add(c.pos);
       p.group.quaternion.copy(c.quat).multiply(p.rOffQ);
       // spawn pop
       const age = (nowMs - p.born) / 180;
       const sc = age < 1 ? Math.max(0.001, easeOutBack(age)) : 1;
       // held pulse
       const pulse = p.held ? 1 + 0.02 * Math.sin(nowMs * 0.008 + p.id) : 1;
-      p.group.scale.setScalar(sc * pulse);
+      let visScale = sc * pulse * c.scale;
+      if (c.dying) {
+        const k = Math.max(0.001, c.dying.t / c.dying.dur);
+        visScale *= c.dying.thrown ? Math.min(1, k * 2.2) : Math.pow(k, 0.8);
+      }
+      p.group.scale.setScalar(visScale);
+      // tint sweep
+      tmpColor.copy(c.tintFrom).lerp(c.tintTo, c.tintMix);
+      p.fill.color.copy(tmpColor);
+      p.fill.emissive.copy(tmpColor);
+      p.wire.color.copy(tmpColor);
       // glow
       const target = p.held ? 1 : p.glowTarget;
       const rate = target > p.glow ? 18 : 6;
@@ -1769,6 +2339,9 @@ function MrWorld({
   const ringLRef = useRef<THREE.Mesh | null>(null);
   const ringRRef = useRef<THREE.Mesh | null>(null);
   const ringMouseRef = useRef<THREE.Mesh | null>(null);
+  const pointLineRef = useRef<THREE.Line | null>(null);
+  const stabRingRef = useRef<THREE.Mesh | null>(null);
+  const ringFxRef = useRef<RingFx | null>(null);
 
   useSessionEvents(session, mode === "xr" ? onSessionEnd : () => undefined, rt);
 
@@ -1785,6 +2358,7 @@ function MrWorld({
       m4: new THREE.Matrix4(),
       up: new THREE.Vector3(0, 1, 0),
       camRight: new THREE.Vector3(),
+      camFwd: new THREE.Vector3(),
       ray: new THREE.Raycaster(),
       dotDummy: new THREE.Object3D(),
       slotWorld: new THREE.Vector3(),
@@ -1894,13 +2468,15 @@ function MrWorld({
       part.held = false;
       // a snap engage lets go with ZERO impulse — the part clicked home
       if (opts?.noImpulse) return;
+      // hard throw: the build sails off in a spark trail and dissolves
+      const yeet = hold.anchorVel.length() > YEET_SPEED;
       // drop-near-face: a tight candidate snaps immediately on release
       const cand = sandbox.snapSearch(part, true);
-      if (cand) {
+      if (cand && !yeet) {
         sandbox.doSnap(cand, side);
       } else {
         sandbox.release(part, hold.anchorVel, side);
-        if (!opts?.silent) mrAudio.release();
+        if (yeet) sandbox.killCluster(part.cluster, true);
       }
     },
     [rt]
@@ -1972,6 +2548,8 @@ function MrWorld({
         hold.part = part;
         hold.mode = grabMode;
         hold.anchorSeen = false;
+        part.cluster.summon = null; // caught a summoned build
+        part.cluster.stabT = 0;
         mrAudio.grab();
         hapticPulse(rt.sources[side], 0.45, 50);
         sandbox.partWorld(part, tmp.v1, tmp.q1);
@@ -2042,8 +2620,9 @@ function MrWorld({
     let bestPart: Part | null = null;
     let bestT = Infinity;
     for (const p of sandbox.parts) {
+      if (p.cluster.dying) continue;
       sandbox.partWorld(p, tmp.v1, tmp.q1);
-      const t = raySphereDist(ro, rd, tmp.v1, SHAPE_BY_ID.get(p.type)!.bound + 0.012);
+      const t = raySphereDist(ro, rd, tmp.v1, SHAPE_BY_ID.get(p.type)!.bound * p.cluster.scale + 0.012);
       if (t >= 0 && t < bestT) {
         bestT = t;
         bestPart = p;
@@ -2092,6 +2671,65 @@ function MrWorld({
           sandbox.particles.burst(at, 6, 0.4);
           if (src) hapticPulse(src, 0.45, 60);
           rt.last.spin = performance.now();
+          break;
+        case "tumble":
+          mrAudio.tumble();
+          sandbox.particles.burst(at, 6, 0.4);
+          if (src) hapticPulse(src, 0.45, 60);
+          rt.last.tumble = performance.now();
+          break;
+        case "push":
+          mrAudio.push();
+          if (src) hapticPulse(src, 0.8, 140);
+          rt.last.push = performance.now();
+          break;
+        case "pull":
+          mrAudio.pull();
+          if (src) hapticPulse(src, 0.5, 90);
+          sandbox.particles.burst(at, 8, 0.5);
+          ringFxRef.current?.spawn(at, rt.camQuat, 0.18, 0.04, 0.4, MR_SKY);
+          rt.last.pull = performance.now();
+          break;
+        case "flick":
+          mrAudio.flick();
+          if (src) hapticPulse(src, 0.35, 50);
+          sandbox.particles.burst(at, 5, 0.5, 0.0026);
+          ringFxRef.current?.spawn(at, rt.camQuat, 0.02, 0.09, 0.22, MR_ICE);
+          rt.last.flick = performance.now();
+          break;
+        case "clone":
+          mrAudio.clone();
+          hapticPulse(rt.sources.left, 0.5, 70);
+          hapticPulse(rt.sources.right, 0.5, 70);
+          sandbox.particles.burst(at, 12, 0.7);
+          ringFxRef.current?.spawn(at, rt.camQuat, 0.03, 0.22, 0.35, MR_ICE);
+          rt.last.clone = performance.now();
+          break;
+        case "crush":
+          mrAudio.crush();
+          hapticPulse(rt.sources.left, 0.9, 160);
+          hapticPulse(rt.sources.right, 0.9, 160);
+          sandbox.particles.burst(at, 26, 1.7);
+          ringFxRef.current?.spawn(at, rt.camQuat, 0.24, 0.03, 0.3, MR_ICE);
+          ringFxRef.current?.spawn(at, rt.camQuat, 0.16, 0.32, 0.34, MR_CYAN);
+          rt.last.crush = performance.now();
+          break;
+        case "stab":
+          mrAudio.stab();
+          if (src) hapticPulse(src, 0.3, 60);
+          ringFxRef.current?.spawn(at, rt.camQuat, 0.07, 0.2, 0.4, MR_SKY);
+          rt.last.stab = performance.now();
+          break;
+        case "tint":
+          mrAudio.tint();
+          if (src) hapticPulse(src, 0.4, 60);
+          ringFxRef.current?.spawn(at, rt.camQuat, 0.1, 0.26, 0.45, MR_SKY);
+          rt.last.tint = performance.now();
+          break;
+        case "yeet":
+          mrAudio.yeet();
+          if (src) hapticPulse(src, 0.55, 90);
+          rt.last.yeet = performance.now();
           break;
         case "full":
           mrAudio.blip(220, 180, 0.08, "square", 0.2);
@@ -2198,6 +2836,43 @@ function MrWorld({
     pal.slots = slots;
     const strutObj = strut;
 
+    // ---- gesture-pack visuals: targeting ray, stabilize ring, fx rings ----
+    const lineGeo = new THREE.BufferGeometry();
+    lineGeo.setAttribute("position", new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, -1], 3));
+    const lineMat = new THREE.LineBasicMaterial({
+      color: MR_SKY,
+      transparent: true,
+      opacity: 0.45,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const pointLine = new THREE.Line(lineGeo, lineMat);
+    pointLine.frustumCulled = false;
+    pointLine.visible = false;
+    pointLine.renderOrder = 4;
+    scene.add(pointLine);
+    pointLineRef.current = pointLine;
+
+    const stabRing = new THREE.Mesh(
+      new THREE.TorusGeometry(1, 0.02, 8, 40),
+      new THREE.MeshBasicMaterial({
+        color: MR_SKY,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      })
+    );
+    stabRing.visible = false;
+    stabRing.frustumCulled = false;
+    stabRing.renderOrder = 5;
+    scene.add(stabRing);
+    stabRingRef.current = stabRing;
+
+    const ringFx = new RingFx(scene);
+    ringFxRef.current = ringFx;
+
     return () => {
       sandbox.dispose();
       rt.sandbox = null;
@@ -2215,6 +2890,16 @@ function MrWorld({
       strutObj.removeFromParent();
       strutGeo.dispose();
       strutMat.dispose();
+      pointLine.removeFromParent();
+      lineGeo.dispose();
+      lineMat.dispose();
+      pointLineRef.current = null;
+      stabRing.removeFromParent();
+      stabRing.geometry.dispose();
+      (stabRing.material as THREE.Material).dispose();
+      stabRingRef.current = null;
+      ringFx.dispose();
+      ringFxRef.current = null;
       pal.group = null;
       pal.panelMat = null;
       pal.exitMat = null;
@@ -2428,6 +3113,32 @@ function MrWorld({
               h.scissors = false;
             }
 
+            // point ☝ (index out, the rest curled, thumb clear of the index)
+            if (wrist && iTip && mTip && rTip && pTip) {
+              const thumbClear = !thumb || thumb.distanceTo(iTip) > 0.04;
+              h.point =
+                thumbClear &&
+                iTip.distanceTo(wrist) > POINT_EXT &&
+                mTip.distanceTo(wrist) < POINT_CURL &&
+                rTip.distanceTo(wrist) < POINT_CURL &&
+                pTip.distanceTo(wrist) < POINT_CURL;
+            } else {
+              h.point = false;
+            }
+
+            // a free OPEN hand (nothing pinched, curled, scissored, pointed)
+            h.open =
+              h.seen &&
+              h.palm.valid &&
+              !h.pinch.active &&
+              !h.pinch.selectActive &&
+              !h.fist &&
+              !h.scissors &&
+              !h.point;
+
+            // index fingertip tracker (flicks + clone taps)
+            updateCollider(h.tip, iTip, dt);
+
             // collider spheres
             updateCollider(h.colPalm, h.palm.valid ? h.palm.center : null, dt);
             const tipPt =
@@ -2495,6 +3206,8 @@ function MrWorld({
               h.pinch.active = false;
               h.fist = false;
               h.scissors = false;
+              h.point = false;
+              h.open = false;
               h.palm.valid = false;
             }
           }
@@ -2508,6 +3221,8 @@ function MrWorld({
           rt.hands[side].pinch.active = false;
           rt.hands[side].fist = false;
           rt.hands[side].scissors = false;
+          rt.hands[side].point = false;
+          rt.hands[side].open = false;
           rt.hands[side].grabActive = false;
         }
       }
@@ -2747,23 +3462,321 @@ function MrWorld({
             rt.vPrevPressed = pi.pressed;
             const x = pi.keys.has("x");
             if (x && !rt.vPrevX) {
-              sandbox.rotateNearest(rt.vPoint.pos, 1, 0.8, "right");
+              sandbox.rotateNearest(rt.vPoint.pos, Y_AXIS, SPIN_IMPULSE, 0.8, "right");
             }
             rt.vPrevX = x;
             if (Math.abs(pi.wheel) > 26) {
-              sandbox.rotateNearest(rt.vPoint.pos, pi.wheel > 0 ? 1 : -1, 0.8, "right");
+              sandbox.rotateNearest(
+                rt.vPoint.pos,
+                Y_AXIS,
+                (pi.wheel > 0 ? 1 : -1) * SPIN_IMPULSE,
+                0.8,
+                "right"
+              );
             }
             pi.wheel = 0;
           }
         }
       });
 
-      /* ---- holds: spring follow, rip, snap-engage ---- */
+      /* ---- telekinesis: point targeting ray, flick, double-tap clone ---- */
+      safe("telekinesis", () => {
+        const line = pointLineRef.current;
+        let rayFrom: THREE.Vector3 | null = null;
+        let rayTo: THREE.Vector3 | null = null;
+        let rayBright = false;
+        if (mode === "xr") {
+          for (const side of sides) {
+            const h = rt.hands[side];
+            if (!h.seen || !h.tip.seen) continue;
+            const speed = h.tip.vel.length();
+            // ---- targeting ray + flick (point pose) ----
+            if (h.point) {
+              const w = jointAt(side, "wrist");
+              if (w) {
+                tmp.v1.copy(h.tip.pos).sub(w);
+                if (tmp.v1.lengthSq() > 1e-6) {
+                  tmp.v1.normalize();
+                  let bestT = FLICK_RANGE;
+                  let bestPart: Part | null = null;
+                  for (const p of sandbox.parts) {
+                    if (p.cluster.dying) continue;
+                    sandbox.partWorld(p, tmp.v2, tmp.q1);
+                    const r = SHAPE_BY_ID.get(p.type)!.bound * p.cluster.scale + 0.015;
+                    const t = raySphereDist(w, tmp.v1, tmp.v2, r);
+                    if (t >= 0 && t < bestT) {
+                      bestT = t;
+                      bestPart = p;
+                    }
+                  }
+                  if (bestPart) {
+                    tmp.v3.copy(w).addScaledVector(tmp.v1, bestT);
+                    for (const p of bestPart.cluster.parts) {
+                      p.glowTarget = Math.max(p.glowTarget, 0.55);
+                    }
+                    if (speed > FLICK_SPEED && now > h.flickCdUntil) {
+                      h.flickCdUntil = now + FLICK_COOLDOWN * 1000;
+                      sandbox.flick(bestPart.cluster, h.tip.vel, tmp.v3, side);
+                    }
+                    rayFrom = h.tip.pos;
+                    rayTo = tmp.v3.clone();
+                    rayBright = true;
+                  } else {
+                    rayFrom = h.tip.pos;
+                    rayTo = tmp.v3.copy(h.tip.pos).addScaledVector(tmp.v1, 0.9).clone();
+                  }
+                }
+              }
+            }
+            // ---- double-tap clone (a free index fingertip) ----
+            if (!h.grabActive && !h.point) {
+              const tapPart = speed < TAP_MAX_SPEED ? sandbox.tryGrab(h.tip.pos, TAP_RADIUS) : null;
+              const tp = h.taps;
+              if (tapPart && !tapPart.cluster.dying && !tapPart.cluster.summon) {
+                const cl = tapPart.cluster;
+                if (!tp.inside) {
+                  tp.inside = true;
+                  if (tp.cluster !== cl) {
+                    tp.cluster = cl;
+                    tp.at = now;
+                  } else if (now - tp.at < TAP_GAP_MS) {
+                    // DOUBLE TAP → a perfect copy pops out beside it
+                    tmp.v4.set(0.17, 0.02, 0).applyQuaternion(rt.camQuat);
+                    const fresh = sandbox.cloneCluster(cl, tmp.v5.copy(cl.pos).add(tmp.v4), side);
+                    if (fresh) {
+                      tp.cluster = null;
+                      tp.at = 0;
+                    }
+                  } else {
+                    tp.at = now;
+                  }
+                }
+              } else if (!tapPart) {
+                tp.inside = false;
+                if (tp.cluster && now - tp.at > TAP_GAP_MS * 2) tp.cluster = null;
+              }
+            }
+          }
+        }
+        if (line) {
+          if (rayFrom && rayTo) {
+            const attr = line.geometry.getAttribute("position") as THREE.BufferAttribute;
+            attr.setXYZ(0, rayFrom.x, rayFrom.y, rayFrom.z);
+            attr.setXYZ(1, rayTo.x, rayTo.y, rayTo.z);
+            attr.needsUpdate = true;
+            line.computeLineDistances?.();
+            line.geometry.computeBoundingSphere();
+            line.visible = true;
+            (line.material as THREE.LineBasicMaterial).opacity = rayBright ? 0.55 : 0.16;
+          } else {
+            line.visible = false;
+          }
+        }
+      });
+
+      /* ---- force gestures: push, pull, stabilize ---- */
+      safe("force", () => {
+        if (mode !== "xr") return;
+        tmp.camFwd.set(0, 0, -1).applyQuaternion(rt.camQuat);
+        let charged: Cluster | null = null;
+        let chargeK = 0;
+        // stabilize charges decay when no still palm is feeding them
+        // (charged clusters get +dt below, so they still climb)
+        for (const c of sandbox.clusters) {
+          if (c.stabT > 0) c.stabT = Math.max(0, c.stabT - dt * 1.6);
+        }
+        for (const side of sides) {
+          const h = rt.hands[side];
+          if (!h.seen || !h.palm.valid) continue;
+          // an active summon keeps following its hand's palm
+          for (const c of sandbox.clusters) {
+            if (c.summon && c.summon.side === side && h.open && h.colPalm.seen) {
+              c.summon.target.copy(h.palm.center).addScaledVector(h.palm.normal, PULL_HOVER);
+            }
+          }
+          if (!h.open || !h.colPalm.seen) continue;
+          const dir = h.palm.normal;
+          const facingAway = dir.dot(tmp.camFwd) > 0.45;
+          const thrust = h.colPalm.vel.dot(dir);
+          // FORCE PUSH: open palm thrust along the palm normal
+          if (facingAway && thrust > PUSH_SPEED && now > h.pushCdUntil) {
+            h.pushCdUntil = now + PUSH_COOLDOWN * 1000;
+            tmp.v1.copy(dir).multiplyScalar(0.8);
+            if (h.colPalm.vel.lengthSq() > 1e-4) {
+              tmp.v1
+                .addScaledVector(tmp.v2.copy(h.colPalm.vel).normalize(), 0.2)
+                .normalize();
+            }
+            sandbox.forcePush(h.palm.center, tmp.v1, side);
+            tmp.v3.copy(h.palm.center).addScaledVector(dir, 0.06);
+            tmp.q1.setFromUnitVectors(Z_AXIS, dir);
+            ringFxRef.current?.spawn(tmp.v3, tmp.q1, 0.07, 0.55, 0.32, MR_CYAN);
+          }
+          // FORCE PULL: open palm snapped back toward the chest
+          if (facingAway && thrust < -PULL_SPEED && now > h.pullCdUntil) {
+            h.pullCdUntil = now + PULL_COOLDOWN * 1000;
+            tmp.v3.copy(h.palm.center).addScaledVector(dir, PULL_HOVER);
+            sandbox.forcePullNearest(h.palm.center, dir, tmp.v3, side);
+          }
+          // STABILIZE: a still palm facing a nearby build calms it
+          if (h.colPalm.vel.length() < 0.3) {
+            for (const c of sandbox.clusters) {
+              if (c.dying || c.summon) continue;
+              if (now < c.stabCdUntil) continue;
+              tmp.v4.copy(c.pos).sub(h.palm.center);
+              const d = tmp.v4.length();
+              if (d > STAB_DIST || d < 1e-4) continue;
+              tmp.v4.multiplyScalar(1 / d);
+              if (tmp.v4.dot(dir) < 0.45) continue;
+              c.stabT += dt * 2.5;
+              for (const p of c.parts) {
+                p.glowTarget = Math.max(p.glowTarget, Math.min(1, (c.stabT / STAB_HOLD_S)) * 0.8);
+              }
+              if (c.stabT >= STAB_HOLD_S) {
+                sandbox.stabilize(c, side);
+              } else if (c.stabT > chargeK) {
+                chargeK = c.stabT;
+                charged = c;
+              }
+            }
+          }
+        }
+        // stabilize charge ring (billboarded on the strongest charging build)
+        const stabRing = stabRingRef.current;
+        if (stabRing) {
+          if (charged && !charged.dying) {
+            const k = Math.min(1, charged.stabT / STAB_HOLD_S);
+            stabRing.visible = true;
+            stabRing.position.copy(charged.pos);
+            stabRing.quaternion.copy(rt.camQuat);
+            stabRing.scale.setScalar(0.09 + 0.05 * k + 0.012 * Math.sin(rt.time * 10));
+            (stabRing.material as THREE.MeshBasicMaterial).opacity = 0.25 + 0.5 * k;
+          } else {
+            stabRing.visible = false;
+          }
+        }
+      });
+
+      /* ---- clap-crush: sandwich a build between both palms ---- */
+      safe("clap", () => {
+        if (mode !== "xr") return;
+        if (now < rt.clapCdUntil) return;
+        const hl = rt.hands.left;
+        const hr = rt.hands.right;
+        if (!hl.open || !hr.open) return;
+        if (!hl.palm.valid || !hr.palm.valid) return;
+        if (!hl.colPalm.seen || !hr.colPalm.seen) return;
+        tmp.v1.copy(hl.palm.center).add(hr.palm.center).multiplyScalar(0.5);
+        let victim: Cluster | null = null;
+        for (const c of sandbox.clusters) {
+          if (c.dying) continue;
+          if (c.pos.distanceTo(tmp.v1) < CLAP_MID) {
+            victim = c;
+            break;
+          }
+        }
+        if (!victim) return;
+        if (victim.pos.distanceTo(hl.palm.center) > CLAP_NEAR) return;
+        if (victim.pos.distanceTo(hr.palm.center) > CLAP_NEAR) return;
+        if (hl.palm.normal.dot(hr.palm.normal) > -0.25) return;
+        tmp.v2.copy(hr.palm.center).sub(hl.palm.center);
+        const sep = tmp.v2.length();
+        if (sep < 1e-4) return;
+        tmp.v2.multiplyScalar(1 / sep);
+        tmp.v3.copy(hr.colPalm.vel).sub(hl.colPalm.vel);
+        const closing = -tmp.v3.dot(tmp.v2);
+        if (closing < CLAP_CLOSE) return;
+        rt.clapCdUntil = now + CLAP_COOLDOWN * 1000;
+        sandbox.killCluster(victim, false);
+      });
+
+      /* ---- holds: two-hand scale/twist, spring follow, shake, snap ---- */
       safe("holds", () => {
+        // ---- two-hand scale & twist (both hands on ONE build) ----
+        const th = rt.twoHand;
+        const lp = rt.holds.left.part;
+        const rp = rt.holds.right.part;
+        const sameCluster = !!(lp && rp && lp.cluster === rp.cluster && !lp.cluster.dying);
+        if (sameCluster) {
+          const c = lp!.cluster;
+          const la =
+            rt.holds.left.mode === "controller"
+              ? rt.ctrl.left.seen
+                ? rt.ctrl.left.pos
+                : null
+              : rt.holds.left.mode === "mouse"
+                ? rt.vPoint.seen
+                  ? rt.vPoint.pos
+                  : null
+                : rt.hands.left.grabActive
+                  ? rt.hands.left.grabPoint
+                  : null;
+          const ra =
+            rt.holds.right.mode === "controller"
+              ? rt.ctrl.right.seen
+                ? rt.ctrl.right.pos
+                : null
+              : rt.holds.right.mode === "mouse"
+                ? rt.vPoint.seen
+                  ? rt.vPoint.pos
+                  : null
+                : rt.hands.right.grabActive
+                  ? rt.hands.right.grabPoint
+                  : null;
+          if (la && ra) {
+            if (!th.active || th.cluster !== c) {
+              th.active = true;
+              th.cluster = c;
+              th.startDist = Math.max(0.05, la.distanceTo(ra));
+              th.startScale = c.scale;
+              th.startDir.copy(ra).sub(la).normalize();
+              th.startQuat.copy(c.quat);
+              th.startPos.copy(c.pos);
+              th.startMid.copy(la).add(ra).multiplyScalar(0.5);
+              th.midPrev.copy(th.startMid);
+              th.midVel.set(0, 0, 0);
+            } else {
+              tmp.v1.copy(la).add(ra).multiplyScalar(0.5);
+              if (dt > 1e-4) {
+                tmp.v2.copy(tmp.v1).sub(th.midPrev).multiplyScalar(1 / dt);
+                if (tmp.v2.length() > 5) tmp.v2.setLength(5);
+                th.midVel.lerp(tmp.v2, 0.5);
+              }
+              th.midPrev.copy(tmp.v1);
+              tmp.v3.copy(ra).sub(la);
+              const dist = Math.max(0.05, tmp.v3.length());
+              tmp.v3.multiplyScalar(1 / dist);
+              c.scale = THREE.MathUtils.clamp(
+                (th.startScale * dist) / th.startDist,
+                SCALE_MIN,
+                SCALE_MAX
+              );
+              tmp.q1.setFromUnitVectors(th.startDir, tmp.v3);
+              c.quat.copy(tmp.q1).multiply(th.startQuat).normalize();
+              c.pos.copy(th.startPos).add(tmp.v1).sub(th.startMid);
+              c.vel.copy(th.midVel);
+              c.angVel.multiplyScalar(Math.exp(-8 * dt));
+              c.settleT = 0;
+            }
+          }
+        } else if (th.active) {
+          th.active = false;
+          if (th.cluster) th.cluster.vel.copy(th.midVel);
+          th.cluster = null;
+          // re-latch the remaining hold's spring where the build now is
+          for (const s of sides) {
+            if (rt.holds[s].part) rt.holds[s].anchorSeen = false;
+          }
+        }
+
         for (const side of sides) {
           const hold = rt.holds[side];
           const part = hold.part;
           if (!part) continue;
+          if (part.cluster.dying) {
+            releaseHold(side, { silent: true, noImpulse: true });
+            continue;
+          }
           let anchor: THREE.Vector3 | null = null;
           if (hold.mode === "controller") {
             if (rt.ctrl[side].seen) anchor = rt.ctrl[side].pos;
@@ -2802,12 +3815,55 @@ function MrWorld({
           hold.anchor.copy(anchor);
           part.held = true;
           part.glowTarget = 1;
+          // the two-hand gesture drives the build directly — no spring
+          if (th.active && part.cluster === th.cluster) continue;
           sandbox.holdUpdate(dt, part, hold.anchor, hold.anchorVel, side);
-          // snap while held: click into place when flush-close
+          // snap while held: magnetic assist + click into place when flush
           const cand = sandbox.snapSearch(part, false);
-          if (cand && cand.lat < SNAP_ENGAGE_LAT && Math.abs(cand.along) < SNAP_ENGAGE_ALONG) {
-            sandbox.doSnap(cand, side);
-            releaseHold(side, { silent: true, cooldown: 350, noImpulse: true });
+          if (cand) {
+            sandbox.partWorld(cand.target, tmp.v1, tmp.q1);
+            sandbox.partWorld(part, tmp.v2, tmp.q1);
+            tmp.v3.copy(tmp.v1).sub(tmp.v2);
+            const dl = tmp.v3.length();
+            if (dl > 0.004) {
+              part.cluster.vel.addScaledVector(
+                tmp.v3.multiplyScalar(1 / dl),
+                Math.min(1.6, MAGNET_ACC * dt)
+              );
+            }
+            if (cand.lat < SNAP_ENGAGE_LAT && Math.abs(cand.along) < SNAP_ENGAGE_ALONG) {
+              sandbox.doSnap(cand, side);
+              releaseHold(side, { silent: true, cooldown: 350, noImpulse: true });
+              continue;
+            }
+          }
+          // ---- shake-to-recolor ----
+          const sh = hold.shake;
+          const sp = hold.anchorVel.length();
+          if (sp > SHAKE_SPEED && now > hold.tintCdUntil) {
+            const axv = hold.anchorVel;
+            const absX = Math.abs(axv.x);
+            const absY = Math.abs(axv.y);
+            const absZ = Math.abs(axv.z);
+            const axis = absX > absY && absX > absZ ? 0 : absY > absZ ? 1 : 2;
+            const dir = Math.sign(axis === 0 ? axv.x : axis === 1 ? axv.y : axv.z);
+            if (dir !== 0) {
+              if (sh.lastDir !== 0 && dir !== sh.lastDir) {
+                sh.flips.push(now);
+                while (sh.flips.length && now - sh.flips[0] > SHAKE_WINDOW_MS) sh.flips.shift();
+                if (sh.flips.length >= SHAKE_FLIPS) {
+                  sh.flips.length = 0;
+                  sh.lastDir = 0;
+                  hold.tintCdUntil = now + 650;
+                  sandbox.recolorCluster(part.cluster, side);
+                }
+              } else if (sh.lastDir === 0) {
+                sh.flips.length = 0;
+              }
+              sh.lastDir = dir;
+            }
+          } else if (sp < 0.22) {
+            sh.lastDir = 0;
           }
         }
       });
@@ -2853,7 +3909,7 @@ function MrWorld({
         }
       });
 
-      /* ---- scissors swipe → drift spin ---- */
+      /* ---- scissors swipe → drift spin / tumble ---- */
       safe("swipe", () => {
         if (mode !== "xr") return;
         tmp.camRight.set(1, 0, 0).applyQuaternion(rt.camQuat);
@@ -2882,7 +3938,27 @@ function MrWorld({
               }
               if (Math.abs(dispR) > SWIPE_DIST && path > SWIPE_DIST * 1.15 && maxV > SWIPE_SPEED) {
                 const sign = dispR < 0 ? 1 : -1; // swipe LEFT → +Y spin
-                const ok = sandbox.rotateNearest(h.palm.center, sign, 0.65, side);
+                const ok = sandbox.rotateNearest(h.palm.center, Y_AXIS, sign * SPIN_IMPULSE, 0.85, side);
+                if (ok) {
+                  h.swipe.cooldownUntil = now + SWIPE_COOLDOWN * 1000;
+                  s.length = 0;
+                }
+              } else if (
+                Math.abs(dy) > TUMBLE_DIST &&
+                Math.abs(dy) > Math.abs(dispR) * 1.35 &&
+                path > TUMBLE_DIST * 1.2 &&
+                maxV > SWIPE_SPEED
+              ) {
+                // vertical ✌ swipe → forward/backward tumble around camera-right
+                const sign = dy > 0 ? 1 : -1;
+                const ok = sandbox.rotateNearest(
+                  h.palm.center,
+                  tmp.camRight,
+                  sign * TUMBLE_IMPULSE,
+                  0.85,
+                  side,
+                  "tumble"
+                );
                 if (ok) {
                   h.swipe.cooldownUntil = now + SWIPE_COOLDOWN * 1000;
                   s.length = 0;
@@ -2900,6 +3976,8 @@ function MrWorld({
 
       /* ---- render sync + effects + debug ---- */
       safe("render", () => {
+        // gesture fx rings live here so they always advance
+        ringFxRef.current?.update(dt);
         // grab-proximity glow for free parts
         for (const p of sandbox.parts) {
           if (p.held) continue;
@@ -2910,7 +3988,7 @@ function MrWorld({
               const h = rt.hands[side];
               if (!h.seen) continue;
               const d = Math.max(
-                h.grabPoint.distanceTo(tmp.v1) - SHAPE_BY_ID.get(p.type)!.bound,
+                h.grabPoint.distanceTo(tmp.v1) - SHAPE_BY_ID.get(p.type)!.bound * p.cluster.scale,
                 0
               );
               const gg = 1 - Math.min(1, d / 0.09);
@@ -2918,7 +3996,7 @@ function MrWorld({
             }
           } else if (rt.vPoint.seen) {
             const d = Math.max(
-              rt.vPoint.pos.distanceTo(tmp.v1) - SHAPE_BY_ID.get(p.type)!.bound,
+              rt.vPoint.pos.distanceTo(tmp.v1) - SHAPE_BY_ID.get(p.type)!.bound * p.cluster.scale,
               0
             );
             g = 1 - Math.min(1, d / 0.09);
@@ -3020,12 +4098,33 @@ function MrWorld({
               pos: [tmp.v1.x, tmp.v1.y, tmp.v1.z],
             });
           }
+          const clustersList = sandbox.clusters.map((c) => ({
+            id: c.id,
+            parts: c.parts.length,
+            scale: +c.scale.toFixed(3),
+            tint: c.tintIdx,
+            dying: !!c.dying,
+            summoned: !!c.summon,
+            pos: [c.pos.x, c.pos.y, c.pos.z] as [number, number, number],
+            vel: [
+              +c.vel.x.toFixed(3),
+              +c.vel.y.toFixed(3),
+              +c.vel.z.toFixed(3),
+            ] as [number, number, number],
+            angVel: [
+              +c.angVel.x.toFixed(3),
+              +c.angVel.y.toFixed(3),
+              +c.angVel.z.toFixed(3),
+            ] as [number, number, number],
+          }));
           tmp.v1.set(0, 1, 0).applyQuaternion(pal.quat);
           mrBridge.debug = {
             build: SANDBOX_BUILD,
             parts: sandbox.parts.length,
             clusters: sandbox.clusters.length,
             partsList,
+            clustersList,
+            twoHand: { active: rt.twoHand.active, scale: rt.twoHand.cluster?.scale ?? 1 },
             palUp: [tmp.v1.x, tmp.v1.y, tmp.v1.z],
             held: { left: rt.holds.left.part !== null, right: rt.holds.right.part !== null },
             palette: { side: pal.side, visible: pal.opacity > 0.5 },
@@ -3038,11 +4137,24 @@ function MrWorld({
               fistR: rt.hands.right.fist,
               scissorsL: rt.hands.left.scissors,
               scissorsR: rt.hands.right.scissors,
+              pointL: rt.hands.left.point,
+              pointR: rt.hands.right.point,
+              openL: rt.hands.left.open,
+              openR: rt.hands.right.open,
             },
             lastSpawnAt: rt.last.spawn,
             lastSnapAt: rt.last.snap,
             lastRipAt: rt.last.rip,
             lastSpinAt: rt.last.spin,
+            lastPushAt: rt.last.push,
+            lastPullAt: rt.last.pull,
+            lastFlickAt: rt.last.flick,
+            lastCloneAt: rt.last.clone,
+            lastCrushAt: rt.last.crush,
+            lastStabAt: rt.last.stab,
+            lastTintAt: rt.last.tint,
+            lastTumbleAt: rt.last.tumble,
+            lastYeetAt: rt.last.yeet,
             grabTrace: rt.grabTrace,
             diag: {
               frame: mrBridge.diag.frame,

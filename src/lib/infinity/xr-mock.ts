@@ -18,8 +18,9 @@
  *   .setHitValid(bool) toggle hit-test results
  *   .pinch('right'|'left', bool) open/close a joint pinch (fires scene press logic)
  *   .pose('right'|'left', name) set the whole hand pose preset:
- *                      'open' | 'pinch' | 'fist' | 'scissors' — drives the
- *                      scene's gesture recognizers (fist grabs, ✌ swipes)
+ *                      'open' | 'pinch' | 'fist' | 'scissors' | 'point' —
+ *                      drives the scene's gesture recognizers (fist grabs,
+ *                      ✌ swipes, ☝ flicks/taps)
  *   .handSelect('right'|'left', bool) pinch that surfaces ONLY as select
  *                      events (joints stay open) — exercises the fallback
  *   .trigger('right'|'left', bool) controller select events
@@ -46,8 +47,8 @@ interface MockDriver {
   /** when false, getJointPose returns null — hand joints unreadable (select fallback still works) */
   jointsReadable: boolean;
   hands: {
-    left: { visible: boolean; pos: THREE.Vector3; pinch: number; curl: number; scissors: number };
-    right: { visible: boolean; pos: THREE.Vector3; pinch: number; curl: number; scissors: number };
+    left: { visible: boolean; pos: THREE.Vector3; pinch: number; curl: number; scissors: number; point: number };
+    right: { visible: boolean; pos: THREE.Vector3; pinch: number; curl: number; scissors: number; point: number };
   };
   /** controller positions (moved via controllerAt — e.g. resting on a desk) */
   controllerPos: {
@@ -105,8 +106,15 @@ function makeTransform(pos: THREE.Vector3, quat: THREE.Quaternion): MockTransfor
 /** Position of a mock joint relative to its hand root.
  *  pinch: 0..1 closes thumb+index tips together.
  *  curl:  0..1 pulls all four fingertips toward the palm (fist).
- *  scissors: 0..1 extends index+middle, curls ring+pinky (✌). */
-function jointOffset(name: string, pinch: number, curl: number, scissors: number): THREE.Vector3 {
+ *  scissors: 0..1 extends index+middle, curls ring+pinky (✌).
+ *  point: 0..1 extends the index alone (☝). */
+function jointOffset(
+  name: string,
+  pinch: number,
+  curl: number,
+  scissors: number,
+  point: number
+): THREE.Vector3 {
   if (name === "wrist") return new THREE.Vector3(0, 0, 0);
   const idx = XR_JOINTS.indexOf(name as (typeof XR_JOINTS)[number]);
   if (idx <= 0) return new THREE.Vector3(0, 0.02, 0.02);
@@ -143,6 +151,13 @@ function jointOffset(name: string, pinch: number, curl: number, scissors: number
   if (name === "ring-finger-tip" || name === "little-finger-tip") {
     base = base.clone().lerp(new THREE.Vector3(lat * 0.5, 0.032, 0.02), scissors);
   }
+  // point: index straight up, the rest curled (thumb stays clear)
+  if (name === "index-finger-tip") {
+    base = base.clone().lerp(new THREE.Vector3(lat, 0.108, 0.0), point);
+  }
+  if (name === "middle-finger-tip" || name === "ring-finger-tip" || name === "little-finger-tip") {
+    base = base.clone().lerp(new THREE.Vector3(lat * 0.6, 0.045, 0.03), point);
+  }
   return base;
 }
 
@@ -169,8 +184,8 @@ function installXrMock(): void {
     hands: {
       // defaults are HELD at chest height — the palm palette floats above
       // the LEFT hand by default (handAt moves either hand anywhere)
-      left: { visible: true, pos: new THREE.Vector3(-0.25, 1.3, -0.45), pinch: 0, curl: 0, scissors: 0 },
-      right: { visible: true, pos: new THREE.Vector3(0.25, 1.3, -0.45), pinch: 0, curl: 0, scissors: 0 },
+      left: { visible: true, pos: new THREE.Vector3(-0.25, 1.3, -0.45), pinch: 0, curl: 0, scissors: 0, point: 0 },
+      right: { visible: true, pos: new THREE.Vector3(0.25, 1.3, -0.45), pinch: 0, curl: 0, scissors: 0, point: 0 },
     },
     controllerPos: {
       left: new THREE.Vector3(-0.22, 1.18, -0.38),
@@ -301,7 +316,7 @@ function installXrMock(): void {
           const side = src.handedness as "left" | "right";
           const h = driver.hands[side];
           if (!h.visible) return null;
-          const pos = h.pos.clone().add(jointOffset(joint.jointName, h.pinch, h.curl, h.scissors));
+          const pos = h.pos.clone().add(jointOffset(joint.jointName, h.pinch, h.curl, h.scissors, h.point));
           return { transform: makeTransform(pos, identityQuat) };
         }
         return null;
@@ -433,11 +448,12 @@ function installXrMock(): void {
       driver.hands[side].pinch = closed ? 1 : 0;
     },
     // whole-hand pose presets driving the scene's gesture recognizers
-    pose: (side: "left" | "right", name: "open" | "pinch" | "fist" | "scissors") => {
+    pose: (side: "left" | "right", name: "open" | "pinch" | "fist" | "scissors" | "point") => {
       const h = driver.hands[side];
       h.pinch = name === "pinch" ? 1 : 0;
       h.curl = name === "fist" ? 1 : 0;
       h.scissors = name === "scissors" ? 1 : 0;
+      h.point = name === "point" ? 1 : 0;
     },
     handAt: (side: "left" | "right", x: number, y: number, z: number) => {
       driver.hands[side].pos.set(x, y, z);

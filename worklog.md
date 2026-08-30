@@ -448,4 +448,5 @@ Work Log:
 - HologramOS is fully gone: no /api/notes, no OS shell/suit code, no hologramos favicon; the app is once again the Infinity orb (desktop voice/typing assistant) + the Quest 3 hologram building-blocks sandbox with 20 gestures.
 
 Stage Summary:
-- The operating system is scrapped and the tree is byte-identical to the last good Hologram Building Blocks version (v2.2.0 "The Gesture Update", the pre-scrap deploy). Spawn/snap/force-push/spin/clap-crush all re-verified live through the real WebXR hand-tracking path with zero errors. lint clean. Redeployed to Vercel (see deploy log below).
+- The operating system is scrapped and the tree is byte-identical to the last good Hologram Building Blocks version (v2.2.0 "The Gesture Update", the pre-scrap deploy). Spawn/snap/force-push/spin/clap-crush all re-verified live through the real WebXR hand-tracking path with zero errors. lint clean.
+- DEPLOYED: commit 64b51dd pushed to origin/main → VERCEL LIVE at infinityassistant.vercel.app: title "Infinity", live chunk f963b89faefa07d3.js contains "v2.2.0-gesture-pack", zero "hologramos" strings in any served chunk. The deployed OS is gone; the building-blocks sandbox is back online.

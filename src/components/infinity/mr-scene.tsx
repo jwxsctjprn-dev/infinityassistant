@@ -1,14 +1,16 @@
 "use client";
 
 /**
- * Infinity — Mixed Reality scene, v2.2.0 "The Gesture Update".
+ * Infinity — Mixed Reality scene, v2.3.0 "The Workshop Window".
  *
  * A zero-gravity hologram playground in passthrough. No desk, no grid,
  * no AI — just you and whatever you build, floating in your room:
  *
- *   • PALM PALETTE — a holographic panel hovers ~10cm above your
- *     (left) palm with a HOLOGRAMS tab of shapes. Reach out with the
- *     other hand, pinch a shape and physically RIP it out of the panel.
+ *   • HOLO WINDOW — a big flat holographic window floats in front of
+ *     you, summoned (and dismissed) with the X/Y/A/B buttons on the
+ *     Touch controllers (the ☰ pill above your palm opens it too when
+ *     your hands are tracked bare). Reach out, pinch a shape and
+ *     physically RIP it out of the window.
  *   • ZERO-G PHYSICS — every hologram floats with real momentum.
  *     Graze one with a fingertip and it drifts; slap it and it flies.
  *     Pinch (or close a fist around) a part to hold it with a spring;
@@ -39,7 +41,8 @@
  *     hologram tints.
  *   • HARD-THROW DESPAWN — hurl a hologram hard: it sails off in a
  *     spark trail and dissolves.
- *   • EXIT — the only UI is the palette itself: pinch & hold EXIT.
+ *   • WINDOW TOGGLE — X, Y, A or B opens/closes the holo window;
+ *     ✕ (hold) closes it, EXIT SANDBOX (hold) leaves the session.
  *
  * Everything that made v2.0.2–v2.1 resilient is kept: the immortal XR
  * loop (guarded render + sectioned frame errors), the press latch, the
@@ -58,7 +61,7 @@ import {
 import { MR_CYAN, MR_ICE, MR_SKY, mrBridge } from "@/lib/infinity/mr-bridge";
 
 /** Deployment verification marker (grep live bundles for this). */
-const SANDBOX_BUILD = "v2.2.0-gesture-pack";
+const SANDBOX_BUILD = "v2.3.0-holo-window";
 
 /* ------------------------------------------------------------------ */
 /* Tuning constants                                                     */
@@ -150,7 +153,7 @@ const YEET_MS = 0.45;
 const CRUSH_MS = 0.26;
 
 /** Magnetic snap assist (acceleration toward a near-flush face). */
-const MAGNET_ACC = 5.5;
+const MAGNET_ACC = 8.5;
 
 /** Hologram tints (shake a held build to cycle). */
 const TINTS = ["#67e8f9", "#f472b6", "#fbbf24", "#4ade80", "#a78bfa", "#e2e8f0"];
@@ -160,31 +163,51 @@ const GRAB_R_PINCH = 0.055;
 const GRAB_R_FIST = 0.07;
 const GRAB_R_CTRL = 0.06;
 
-/** Snap search (face-centre space, metres). */
-const SNAP_DOT = -0.82;
-const SNAP_ALONG = 0.052;
-const SNAP_LAT = 0.034;
-const SNAP_TIGHT_ALONG = 0.04;
-const SNAP_TIGHT_LAT = 0.028;
+/** Snap search (face-centre space, metres) — deliberately forgiving:
+ *  the rotational magnet straightens the approach, so these gates
+ *  only need to catch a sloppy bring-together. */
+const SNAP_DOT = -0.62;
+const SNAP_ALONG = 0.11;
+const SNAP_LAT = 0.062;
+const SNAP_TIGHT_ALONG = 0.09;
+const SNAP_TIGHT_LAT = 0.05;
 /** Snap engages instantly when this close while held. */
-const SNAP_ENGAGE_LAT = 0.02;
-const SNAP_ENGAGE_ALONG = 0.032;
+const SNAP_ENGAGE_LAT = 0.046;
+const SNAP_ENGAGE_ALONG = 0.075;
+/** Snap engage also requires the faces within this angle (rad). */
+const SNAP_ENGAGE_ANG = 0.55;
+/** Rotational magnet strength (ang-vel gain toward flush alignment). */
+const ROT_MAG = 9.0;
 
-/** Palette geometry (metres, panel-local). */
-const PAL_W = 0.16;
-const PAL_H = 0.125;
-const PAL_SLOT = 0.032;
-const PAL_GAP = 0.006;
-const PAL_LIFT = 0.105; // hover height above the palm
-const SLOT_GRAB_R = 0.036;
-const EXIT_POS = new THREE.Vector3(0.058, -0.049, 0.004);
-const EXIT_W = 0.04;
-const EXIT_H = 0.02;
-const EXIT_HOLD_S = 0.7;
-
-/** Palette hand selection hysteresis. */
-const PAL_MIN_JOINTS = 5;
-const PAL_SWITCH_MS = 400;
+/** Holo window geometry (metres, window-local). Big and flat — a
+ *  workshop board you summon in front of you, not a palm gadget. */
+const PAL_W = 1.04;
+const PAL_H = 0.65;
+const PAL_SLOT = 0.19;
+const PAL_GAP = 0.024;
+const SLOT_GRAB_R = 0.075;
+/** Where the window materialises: this far in front of the head. */
+const WIN_DIST = 0.74;
+const WIN_HEIGHT = 1.32;
+/** ✕ close button (top-right) + session EXIT (bottom-right). */
+const CLOSE_POS = new THREE.Vector3(PAL_W / 2 - 0.085, PAL_H / 2 - 0.052, 0.006);
+const CLOSE_W = 0.13;
+const CLOSE_H = 0.05;
+const CLOSE_HOLD_S = 0.45;
+const EXIT_POS = new THREE.Vector3(PAL_W / 2 - 0.115, -PAL_H / 2 + 0.045, 0.006);
+const EXIT_W = 0.21;
+const EXIT_H = 0.052;
+const EXIT_HOLD_S = 0.8;
+/** Hands-only ☰ summon pill (floats above the left palm when the
+ *  window is closed and no controller has been seen). */
+const PILL_LIFT = 0.11;
+const PILL_SIZE = 0.052;
+const PILL_GRAB_R = 0.05;
+/** Controller buttons that toggle the window (X/Y/A/B + any
+ *  non-standard extras some firmwares expose). 0 trigger, 1 grip and
+ *  4 thumbstick-click are excluded on purpose. */
+const TOGGLE_BTN_INDICES = [2, 3, 6, 7, 8];
+const TOGGLE_COOLDOWN_S = 0.35;
 
 /** Snap settle animation (ms). */
 const SETTLE_MS = 140;
@@ -339,7 +362,7 @@ function makeShapes(): ShapeDef[] {
       bound: d.bound,
       faces: d.faces(),
       twist: d.twist,
-      mini: 0.0125 / d.bound,
+      mini: 0.036 / d.bound,
     };
   });
 }
@@ -348,15 +371,15 @@ function makeShapes(): ShapeDef[] {
 const SHAPES: ShapeDef[] = makeShapes();
 const SHAPE_BY_ID = new Map(SHAPES.map((s) => [s.id, s]));
 
-/** Slot layout: 4×2 grid on the panel (panel-local). */
+/** Slot layout: 4×2 grid on the window (window-local). */
 const SLOT_LOCAL: THREE.Vector3[] = [];
 for (let cy = 0; cy < 2; cy++) {
   for (let cx = 0; cx < 4; cx++) {
     SLOT_LOCAL.push(
       new THREE.Vector3(
         (cx - 1.5) * (PAL_SLOT + PAL_GAP),
-        0.01 + (0.5 - cy) * (PAL_SLOT + PAL_GAP),
-        0.005
+        0.038 + (0.5 - cy) * (PAL_SLOT + PAL_GAP),
+        0.008
       )
     );
   }
@@ -481,8 +504,10 @@ interface Hold {
   /** the part released most recently (colliders leave it alone briefly) */
   recent: Part | null;
   recentUntil: number;
-  /** holding the palette EXIT button */
+  /** holding the session EXIT button */
   exit: boolean;
+  /** holding the window ✕ CLOSE button */
+  close: boolean;
   /** shake-to-recolor recognizer */
   shake: { lastDir: number; flips: number[] };
   tintCdUntil: number;
@@ -515,14 +540,14 @@ interface HandRt {
 }
 
 interface PaletteRt {
-  side: "left" | "right" | "virtual" | "ctrl" | null;
-  candidate: "left" | "right" | null;
-  candidateSince: number;
-  handsEver: boolean;
+  /** summon target state — flipped by button/pill/DOM, animated via openT */
+  open: boolean;
+  /** last settled open state (edge detector for placement + sound) */
+  wasOpen: boolean;
+  /** animated 0..1 open factor */
+  openT: number;
   pos: THREE.Vector3;
   quat: THREE.Quaternion;
-  targetPos: THREE.Vector3;
-  targetQuat: THREE.Quaternion;
   scale: number;
   opacity: number;
   hoverSlot: number;
@@ -530,26 +555,41 @@ interface PaletteRt {
   exitSide: HandSide | null;
   exited: boolean;
   exitTickAt: number;
+  closeProgress: number;
+  closeSide: HandSide | null;
+  closeTickAt: number;
+  /** window-toggle cooldown (ms clock) so both controllers can't double-fire */
+  toggleCdUntil: number;
   slotPulse: number[];
   texKey: string;
   group: THREE.Group | null;
   panelMat: THREE.MeshBasicMaterial | null;
   exitMat: THREE.MeshBasicMaterial | null;
-  strutMat: THREE.LineBasicMaterial | null;
-  strutGeo: THREE.BufferGeometry | null;
+  closeMat: THREE.MeshBasicMaterial | null;
   panelCanvas: HTMLCanvasElement | null;
   panelTex: THREE.CanvasTexture | null;
   exitCanvas: HTMLCanvasElement | null;
   exitTex: THREE.CanvasTexture | null;
+  closeCanvas: HTMLCanvasElement | null;
+  closeTex: THREE.CanvasTexture | null;
   slots: Array<{ group: THREE.Group; fill: THREE.MeshStandardMaterial; wire: THREE.MeshBasicMaterial }>;
+  /** hands-only ☰ summon pill */
+  pill: {
+    group: THREE.Group | null;
+    mat: THREE.MeshBasicMaterial | null;
+    pos: THREE.Vector3;
+    quat: THREE.Quaternion;
+    opacity: number;
+    pulse: number;
+  };
 }
 
 interface Rt {
   holds: { left: Hold; right: Hold };
   hands: { left: HandRt; right: HandRt };
   ctrl: {
-    left: { pos: THREE.Vector3; prev: THREE.Vector3; vel: THREE.Vector3; seen: boolean };
-    right: { pos: THREE.Vector3; prev: THREE.Vector3; vel: THREE.Vector3; seen: boolean };
+    left: { pos: THREE.Vector3; prev: THREE.Vector3; vel: THREE.Vector3; seen: boolean; menuButtons: Set<number> };
+    right: { pos: THREE.Vector3; prev: THREE.Vector3; vel: THREE.Vector3; seen: boolean; menuButtons: Set<number> };
   };
   pressQueue: Array<{ type: "begin" | "end"; side: HandSide }>;
   /** dedupes double press-begins (joint pinch + select event firing together) */
@@ -563,7 +603,7 @@ interface Rt {
   firstFrame: boolean;
   fpsAt: number;
   fpsFrames: number;
-  cmdSeen: number;
+  cmdSeen: { clear: number; toggle: number };
   last: {
     spawn: number;
     snap: number;
@@ -614,6 +654,7 @@ function makeHold(): Hold {
     recent: null,
     recentUntil: 0,
     exit: false,
+    close: false,
     shake: { lastDir: 0, flips: [] },
     tintCdUntil: 0,
   };
@@ -652,20 +693,17 @@ function makeRt(): Rt {
     holds: { left: makeHold(), right: makeHold() },
     hands: { left: makeHandRt(), right: makeHandRt() },
     ctrl: {
-      left: { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), seen: false },
-      right: { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), seen: false },
+      left: { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), seen: false, menuButtons: new Set<number>() },
+      right: { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), seen: false, menuButtons: new Set<number>() },
     },
     pressQueue: [],
     pressLatch: new Set<unknown>(),
     palette: {
-      side: null,
-      candidate: null,
-      candidateSince: 0,
-      handsEver: false,
-      pos: new THREE.Vector3(0, 1.3, -0.4),
+      open: false,
+      wasOpen: false,
+      openT: 0,
+      pos: new THREE.Vector3(0, WIN_HEIGHT, -WIN_DIST),
       quat: new THREE.Quaternion(),
-      targetPos: new THREE.Vector3(0, 1.3, -0.4),
-      targetQuat: new THREE.Quaternion(),
       scale: 1,
       opacity: 0,
       hoverSlot: -1,
@@ -673,18 +711,31 @@ function makeRt(): Rt {
       exitSide: null,
       exited: false,
       exitTickAt: 0,
+      closeProgress: 0,
+      closeSide: null,
+      closeTickAt: 0,
+      toggleCdUntil: 0,
       slotPulse: SLOT_LOCAL.map(() => 0),
       texKey: "",
       group: null,
       panelMat: null,
       exitMat: null,
-      strutMat: null,
-      strutGeo: null,
+      closeMat: null,
       panelCanvas: null,
       panelTex: null,
       exitCanvas: null,
       exitTex: null,
+      closeCanvas: null,
+      closeTex: null,
       slots: [],
+      pill: {
+        group: null,
+        mat: null,
+        pos: new THREE.Vector3(0, 1.3, -0.4),
+        quat: new THREE.Quaternion(),
+        opacity: 0,
+        pulse: 0,
+      },
     },
     sandbox: null,
     sources: { left: null, right: null },
@@ -694,7 +745,7 @@ function makeRt(): Rt {
     firstFrame: false,
     fpsAt: 0,
     fpsFrames: 0,
-    cmdSeen: 0,
+    cmdSeen: { clear: 0, toggle: 0 },
     last: {
       spawn: 0,
       snap: 0,
@@ -936,6 +987,14 @@ const mrAudio = {
   exit(): void {
     this.blip(880, 220, 0.35, "triangle", 0.4);
   },
+  winOpen(): void {
+    this.blip(320, 760, 0.16, "triangle", 0.34);
+    this.noise(0.1, 900, 2600, 0.16);
+  },
+  winClose(): void {
+    this.blip(700, 260, 0.16, "triangle", 0.3);
+    this.noise(0.09, 2200, 700, 0.14);
+  },
 };
 
 /* ------------------------------------------------------------------ */
@@ -975,9 +1034,11 @@ function roundRect(
   ctx.closePath();
 }
 
-/** panel-local (m) → palette canvas px (512×400) */
+/** window-local (m) → window canvas px (1024×640) */
+const WIN_TEX_W = 1024;
+const WIN_TEX_H = 640;
 function palPx(x: number, y: number): [number, number] {
-  return [(x / PAL_W + 0.5) * 512, (0.5 - y / PAL_H) * 400];
+  return [(x / PAL_W + 0.5) * WIN_TEX_W, (0.5 - y / PAL_H) * WIN_TEX_H];
 }
 
 function drawPaletteTexture(
@@ -993,53 +1054,47 @@ function drawPaletteTexture(
 
   // glass body
   ctx.fillStyle = "rgba(3, 9, 20, 0.62)";
-  roundRect(ctx, 6, 6, W - 12, H - 12, 26);
+  roundRect(ctx, 8, 8, W - 16, H - 16, 34);
   ctx.fill();
   ctx.strokeStyle = MR_CYAN;
-  ctx.lineWidth = 2.5;
+  ctx.lineWidth = 3.5;
   ctx.shadowColor = MR_CYAN;
-  ctx.shadowBlur = 12;
-  roundRect(ctx, 6, 6, W - 12, H - 12, 26);
+  ctx.shadowBlur = 18;
+  roundRect(ctx, 8, 8, W - 16, H - 16, 34);
   ctx.stroke();
   ctx.shadowBlur = 0;
 
-  // tab row
-  const [tx, ty] = palPx(-PAL_W / 2 + 0.004, PAL_H / 2 - 0.004);
-  const tabW = 132;
-  const tabH = 30;
-  ctx.fillStyle = "rgba(56, 189, 248, 0.16)";
-  roundRect(ctx, tx, ty, tabW, tabH, 8);
-  ctx.fill();
-  ctx.strokeStyle = "rgba(125, 211, 252, 0.9)";
-  ctx.lineWidth = 2;
-  roundRect(ctx, tx, ty, tabW, tabH, 8);
-  ctx.stroke();
+  // header title
+  const hx = 44;
+  const hy = 30;
   ctx.fillStyle = "rgba(224, 242, 254, 0.96)";
-  ctx.font = "600 17px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.font = "700 34px ui-monospace, SFMono-Regular, Menlo, monospace";
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  ctx.fillText("HOLOGRAMS", tx + 14, ty + tabH / 2 + 1);
-
-  // ghost tab (future tabs hint)
-  ctx.strokeStyle = "rgba(125, 211, 252, 0.28)";
-  ctx.lineWidth = 2;
-  roundRect(ctx, tx + tabW + 10, ty, 46, tabH, 8);
-  ctx.stroke();
-  ctx.fillStyle = "rgba(125, 211, 252, 0.4)";
-  ctx.font = "600 17px ui-monospace, SFMono-Regular, Menlo, monospace";
-  ctx.fillText("· · ·", tx + tabW + 20, ty + tabH / 2 + 1);
+  ctx.fillText("HOLOGRAMS", hx, hy + 20);
+  ctx.fillStyle = "rgba(125, 211, 252, 0.55)";
+  ctx.font = "600 20px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillText("WORKSHOP WINDOW", hx, hy + 52);
 
   // ∞ mark
-  ctx.fillStyle = "rgba(125, 211, 252, 0.55)";
-  ctx.font = "600 26px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillStyle = "rgba(125, 211, 252, 0.6)";
+  ctx.font = "600 40px ui-monospace, SFMono-Regular, Menlo, monospace";
   ctx.textAlign = "right";
-  ctx.fillText("∞", W - 24, ty + tabH / 2 + 1);
+  ctx.fillText("∞", W - 190, hy + 30);
+
+  // header rule
+  ctx.strokeStyle = "rgba(125, 211, 252, 0.35)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(36, 102);
+  ctx.lineTo(W - 36, 102);
+  ctx.stroke();
 
   // slot frames + labels
   ctx.textAlign = "center";
   for (let i = 0; i < SLOT_LOCAL.length && i < SHAPES.length; i++) {
     const [cx, cy] = palPx(SLOT_LOCAL[i].x, SLOT_LOCAL[i].y);
-    const s = (PAL_SLOT / PAL_W) * 512;
+    const s = (PAL_SLOT / PAL_W) * W;
     const pulse = slotPulse[i] ?? 0;
     const hot = i === hoverSlot;
     ctx.fillStyle = hot
@@ -1047,27 +1102,29 @@ function drawPaletteTexture(
       : pulse > 0
         ? `rgba(56, 189, 248, ${0.08 + 0.2 * pulse})`
         : "rgba(56, 189, 248, 0.07)";
-    roundRect(ctx, cx - s / 2, cy - s / 2, s, s, 12);
+    roundRect(ctx, cx - s / 2, cy - s / 2, s, s, 20);
     ctx.fill();
     ctx.strokeStyle = hot
       ? "rgba(224, 242, 254, 0.95)"
       : pulse > 0
         ? `rgba(125, 211, 252, ${0.5 + 0.5 * pulse})`
         : "rgba(125, 211, 252, 0.42)";
-    ctx.lineWidth = hot ? 3 : 2;
-    roundRect(ctx, cx - s / 2, cy - s / 2, s, s, 12);
+    ctx.lineWidth = hot ? 4 : 3;
+    roundRect(ctx, cx - s / 2, cy - s / 2, s, s, 20);
     ctx.stroke();
-    ctx.fillStyle = "rgba(148, 197, 224, 0.75)";
-    ctx.font = "500 13px ui-monospace, SFMono-Regular, Menlo, monospace";
-    ctx.fillText(SHAPES[i].label, cx, cy + s / 2 + 13);
+    ctx.fillStyle = "rgba(148, 197, 224, 0.85)";
+    ctx.font = "600 22px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.fillText(SHAPES[i].label, cx, cy + s / 2 + 22);
   }
 
-  // hint
-  const [hx, hy] = palPx(-PAL_W / 2 + 0.01, -0.046);
-  ctx.fillStyle = "rgba(148, 197, 224, 0.62)";
-  ctx.font = "500 14px ui-monospace, SFMono-Regular, Menlo, monospace";
+  // footer hint
+  ctx.fillStyle = "rgba(148, 197, 224, 0.7)";
+  ctx.font = "600 21px ui-monospace, SFMono-Regular, Menlo, monospace";
   ctx.textAlign = "left";
-  ctx.fillText("PINCH & PULL", hx, hy);
+  ctx.fillText("PINCH A SHAPE AND PULL IT OUT", 44, H - 58);
+  ctx.fillStyle = "rgba(125, 211, 252, 0.5)";
+  ctx.font = "500 19px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillText("X · Y · A · B TOGGLES THIS WINDOW", 44, H - 30);
 }
 
 function drawExitTexture(canvas: HTMLCanvasElement, progress: number): void {
@@ -1077,21 +1134,21 @@ function drawExitTexture(canvas: HTMLCanvasElement, progress: number): void {
   const H = canvas.height;
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = "rgba(3, 9, 20, 0.72)";
-  roundRect(ctx, 5, 5, W - 10, H - 10, 14);
+  roundRect(ctx, 5, 5, W - 10, H - 10, 16);
   ctx.fill();
   const hot = progress > 0;
   ctx.strokeStyle = hot ? MR_ICE : "rgba(125, 211, 252, 0.75)";
   ctx.lineWidth = 2.5;
   ctx.shadowColor = MR_CYAN;
   ctx.shadowBlur = hot ? 14 : 8;
-  roundRect(ctx, 5, 5, W - 10, H - 10, 14);
+  roundRect(ctx, 5, 5, W - 10, H - 10, 16);
   ctx.stroke();
   ctx.shadowBlur = 0;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillStyle = "rgba(224, 242, 254, 0.96)";
-  ctx.font = "600 34px ui-monospace, SFMono-Regular, Menlo, monospace";
-  ctx.fillText("EXIT", W / 2, H / 2 - 6);
+  ctx.font = "600 30px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillText("HOLD TO EXIT SANDBOX", W / 2, H / 2 - 6);
   // hold-progress bar
   ctx.fillStyle = "rgba(125, 211, 252, 0.18)";
   roundRect(ctx, 26, H - 24, W - 52, 8, 4);
@@ -1101,6 +1158,67 @@ function drawExitTexture(canvas: HTMLCanvasElement, progress: number): void {
     roundRect(ctx, 26, H - 24, (W - 52) * Math.min(1, progress), 8, 4);
     ctx.fill();
   }
+}
+
+function drawCloseTexture(canvas: HTMLCanvasElement, progress: number): void {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const W = canvas.width;
+  const H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "rgba(3, 9, 20, 0.72)";
+  roundRect(ctx, 5, 5, W - 10, H - 10, 16);
+  ctx.fill();
+  const hot = progress > 0;
+  ctx.strokeStyle = hot ? MR_ICE : "rgba(125, 211, 252, 0.75)";
+  ctx.lineWidth = 2.5;
+  ctx.shadowColor = MR_CYAN;
+  ctx.shadowBlur = hot ? 14 : 8;
+  roundRect(ctx, 5, 5, W - 10, H - 10, 16);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "rgba(224, 242, 254, 0.96)";
+  ctx.font = "600 30px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillText("✕  HOLD TO CLOSE", W / 2, H / 2 - 6);
+  ctx.fillStyle = "rgba(125, 211, 252, 0.18)";
+  roundRect(ctx, 26, H - 24, W - 52, 8, 4);
+  ctx.fill();
+  if (progress > 0) {
+    ctx.fillStyle = MR_ICE;
+    roundRect(ctx, 26, H - 24, (W - 52) * Math.min(1, progress), 8, 4);
+    ctx.fill();
+  }
+}
+
+/** Hands-only ☰ summon pill (128×128). */
+function drawPillTexture(canvas: HTMLCanvasElement, pulse: number): void {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const W = canvas.width;
+  const H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "rgba(3, 9, 20, 0.66)";
+  roundRect(ctx, 8, 8, W - 16, H - 16, 22);
+  ctx.fill();
+  ctx.strokeStyle = pulse > 0 ? MR_ICE : MR_CYAN;
+  ctx.lineWidth = 3;
+  ctx.shadowColor = MR_CYAN;
+  ctx.shadowBlur = 10 + 8 * pulse;
+  roundRect(ctx, 8, 8, W - 16, H - 16, 22);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = "rgba(224, 242, 254, 0.95)";
+  ctx.lineWidth = 9;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  for (let i = 0; i < 3; i++) {
+    const y = H / 2 - 18 + i * 18;
+    ctx.moveTo(W / 2 - 24, y);
+    ctx.lineTo(W / 2 + 24, y);
+  }
+  ctx.stroke();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1759,8 +1877,8 @@ class Sandbox {
             const latSq = Math.max(0, d.lengthSq() - along * along);
             const lat = Math.sqrt(latSq);
             // proximity glow even when not accepted
-            if (dot < -0.6 && Math.abs(along) < 0.09 && lat < 0.07) {
-              const prox = 1 - lat / 0.07;
+            if (dot < -0.5 && Math.abs(along) < 0.12 && lat < 0.085) {
+              const prox = 1 - lat / 0.085;
               if (prox > t.glowTarget) t.glowTarget = prox;
             }
             if (Math.abs(along) > maxAlong || lat > maxLat) continue;
@@ -1848,11 +1966,12 @@ class Sandbox {
     mc.parts.length = 0;
     tc.parts.push(...movParts);
     tc.mass = tc.parts.length;
-    // conserve momentum (weighted), damped
+    // conserve momentum (weighted), heavily damped — a fresh snap reads
+    // as ONE solid piece, not two still arguing about velocity
     const wT = oldMass / (oldMass + movMass);
     const wM = movMass / (oldMass + movMass);
-    tc.vel.multiplyScalar(wT).addScaledVector(mc.vel, wM).multiplyScalar(0.7);
-    tc.angVel.multiplyScalar(wT).addScaledVector(mc.angVel, wM).multiplyScalar(0.5);
+    tc.vel.multiplyScalar(wT).addScaledVector(mc.vel, wM).multiplyScalar(0.45);
+    tc.angVel.multiplyScalar(wT).addScaledVector(mc.angVel, wM).multiplyScalar(0.12);
     tc.settleT = SETTLE_MS / 1000;
     const k = this.clusters.indexOf(mc);
     if (k >= 0) this.clusters.splice(k, 1);
@@ -2354,7 +2473,11 @@ function MrWorld({
       v4: new THREE.Vector3(),
       v5: new THREE.Vector3(),
       v6: new THREE.Vector3(),
+      v7: new THREE.Vector3(),
+      v8: new THREE.Vector3(),
       q1: new THREE.Quaternion(),
+      q2: new THREE.Quaternion(),
+      q3: new THREE.Quaternion(),
       m4: new THREE.Matrix4(),
       up: new THREE.Vector3(0, 1, 0),
       camRight: new THREE.Vector3(),
@@ -2453,6 +2576,7 @@ function MrWorld({
     (side: HandSide, opts?: { silent?: boolean; cooldown?: number; noImpulse?: boolean }) => {
       const hold = rt.holds[side];
       hold.exit = false;
+      hold.close = false;
       const part = hold.part;
       if (!part) return;
       hold.part = null;
@@ -2493,14 +2617,33 @@ function MrWorld({
       }
       mrAudio.ensure();
       const pal = rt.palette;
-      if (pal.opacity > 0.6) {
-        // EXIT button first (deliberate small target)
+      // hands-only ☰ summon pill (only visible while the window is closed)
+      if (!pal.open && pal.pill.opacity > 0.5 && point.distanceTo(pal.pill.pos) < PILL_GRAB_R) {
+        rt.grabTrace = "pill";
+        pal.open = true;
+        hapticPulse(rt.sources[side], 0.6, 90);
+        return;
+      }
+      if (pal.openT > 0.55) {
+        // ✕ close button (top-right)
+        tmp.exitWorld
+          .copy(CLOSE_POS)
+          .multiplyScalar(pal.scale)
+          .applyQuaternion(pal.quat)
+          .add(pal.pos);
+        if (point.distanceTo(tmp.exitWorld) < 0.045) {
+          rt.grabTrace = "close";
+          hold.close = true;
+          pal.closeSide = side;
+          return;
+        }
+        // session EXIT button (bottom-right)
         tmp.exitWorld
           .copy(EXIT_POS)
           .multiplyScalar(pal.scale)
           .applyQuaternion(pal.quat)
           .add(pal.pos);
-        if (point.distanceTo(tmp.exitWorld) < 0.032) {
+        if (point.distanceTo(tmp.exitWorld) < 0.05) {
           rt.grabTrace = "exit";
           hold.exit = true;
           pal.exitSide = side;
@@ -2576,26 +2719,27 @@ function MrWorld({
     const ro = tmp.ray.ray.origin;
     const rd = tmp.ray.ray.direction;
     const pal = rt.palette;
-    if (pal.opacity > 0.6) {
+    if (pal.openT > 0.55) {
+      // ✕ close (top-right) — the DOM bar carries session EXIT on preview
       tmp.exitWorld
-        .copy(EXIT_POS)
+        .copy(CLOSE_POS)
         .multiplyScalar(pal.scale)
         .applyQuaternion(pal.quat)
         .add(pal.pos);
-      if (raySphereDist(ro, rd, tmp.exitWorld, 0.02) >= 0) {
-        rt.holds.right.exit = true;
-        pal.exitSide = "right";
+      if (raySphereDist(ro, rd, tmp.exitWorld, 0.035) >= 0) {
+        rt.holds.right.close = true;
+        pal.closeSide = "right";
         return;
       }
       let slot = -1;
-      let best = 0.024;
+      let best = 0.05;
       for (let i = 0; i < SLOT_LOCAL.length; i++) {
         tmp.slotWorld
           .copy(SLOT_LOCAL[i])
           .multiplyScalar(pal.scale)
           .applyQuaternion(pal.quat)
           .add(pal.pos);
-        const d = raySphereDist(ro, rd, tmp.slotWorld, 0.024);
+        const d = raySphereDist(ro, rd, tmp.slotWorld, 0.05);
         if (d >= 0 && d < best) {
           best = d;
           slot = i;
@@ -2739,11 +2883,11 @@ function MrWorld({
     sandbox.onCount = (n) => eventsRef.current.onParts(n);
     rt.sandbox = sandbox;
 
-    // ---- palette ----
+    // ---- holo window ----
     const group = new THREE.Group();
     const panelCanvas = document.createElement("canvas");
-    panelCanvas.width = 512;
-    panelCanvas.height = 400;
+    panelCanvas.width = WIN_TEX_W;
+    panelCanvas.height = WIN_TEX_H;
     drawPaletteTexture(panelCanvas, -1, rt.palette.slotPulse);
     const panelTex = new THREE.CanvasTexture(panelCanvas);
     panelTex.colorSpace = THREE.SRGBColorSpace;
@@ -2789,7 +2933,7 @@ function MrWorld({
     });
 
     const exitCanvas = document.createElement("canvas");
-    exitCanvas.width = 256;
+    exitCanvas.width = 512;
     exitCanvas.height = 128;
     drawExitTexture(exitCanvas, 0);
     const exitTex = new THREE.CanvasTexture(exitCanvas);
@@ -2805,36 +2949,66 @@ function MrWorld({
     exitBtn.position.copy(EXIT_POS);
     exitBtn.renderOrder = 3;
     group.add(exitBtn);
+
+    // ✕ close button (top-right)
+    const closeCanvas = document.createElement("canvas");
+    closeCanvas.width = 384;
+    closeCanvas.height = 128;
+    drawCloseTexture(closeCanvas, 0);
+    const closeTex = new THREE.CanvasTexture(closeCanvas);
+    closeTex.colorSpace = THREE.SRGBColorSpace;
+    const closeMat = new THREE.MeshBasicMaterial({
+      map: closeTex,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const closeBtn = new THREE.Mesh(new THREE.PlaneGeometry(CLOSE_W, CLOSE_H), closeMat);
+    closeBtn.position.copy(CLOSE_POS);
+    closeBtn.renderOrder = 3;
+    group.add(closeBtn);
     group.visible = false;
     scene.add(group);
 
-    // palm→panel strut
-    const strutGeo = new THREE.BufferGeometry();
-    strutGeo.setAttribute("position", new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 3));
-    const strutMat = new THREE.LineBasicMaterial({
-      color: MR_SKY,
+    // hands-only ☰ summon pill
+    const pillGroup = new THREE.Group();
+    const pillCanvas = document.createElement("canvas");
+    pillCanvas.width = 128;
+    pillCanvas.height = 128;
+    drawPillTexture(pillCanvas, 0);
+    const pillTex = new THREE.CanvasTexture(pillCanvas);
+    pillTex.colorSpace = THREE.SRGBColorSpace;
+    const pillMat = new THREE.MeshBasicMaterial({
+      map: pillTex,
       transparent: true,
       opacity: 0,
-      blending: THREE.AdditiveBlending,
       depthWrite: false,
+      side: THREE.DoubleSide,
     });
-    const strut = new THREE.LineSegments(strutGeo, strutMat);
-    strut.frustumCulled = false;
-    strut.visible = false;
-    scene.add(strut);
+    const pillMesh = new THREE.Mesh(new THREE.PlaneGeometry(PILL_SIZE, PILL_SIZE), pillMat);
+    pillMesh.renderOrder = 3;
+    pillGroup.add(pillMesh);
+    pillGroup.visible = false;
+    scene.add(pillGroup);
 
     const pal = rt.palette;
     pal.group = group;
     pal.panelMat = panelMat;
     pal.exitMat = exitMat;
-    pal.strutMat = strutMat;
-    pal.strutGeo = strutGeo;
+    pal.closeMat = closeMat;
     pal.panelCanvas = panelCanvas;
     pal.panelTex = panelTex;
     pal.exitCanvas = exitCanvas;
     pal.exitTex = exitTex;
+    pal.closeCanvas = closeCanvas;
+    pal.closeTex = closeTex;
     pal.slots = slots;
-    const strutObj = strut;
+    pal.pill.group = pillGroup;
+    pal.pill.mat = pillMat;
+    const pillTexObj = pillTex;
+    // desktop preview starts with the window open (no controllers there)
+    if (mode === "preview") pal.open = true;
 
     // ---- gesture-pack visuals: targeting ray, stabilize ring, fx rings ----
     const lineGeo = new THREE.BufferGeometry();
@@ -2883,13 +3057,17 @@ function MrWorld({
       exitBtn.geometry.dispose();
       exitMat.dispose();
       exitTex.dispose();
+      closeBtn.geometry.dispose();
+      closeMat.dispose();
+      closeTex.dispose();
       for (const s of slots) {
         s.fill.dispose();
         s.wire.dispose();
       }
-      strutObj.removeFromParent();
-      strutGeo.dispose();
-      strutMat.dispose();
+      if (pal.pill.group) pal.pill.group.removeFromParent();
+      pillMesh.geometry.dispose();
+      pillMat.dispose();
+      pillTexObj.dispose();
       pointLine.removeFromParent();
       lineGeo.dispose();
       lineMat.dispose();
@@ -2903,15 +3081,18 @@ function MrWorld({
       pal.group = null;
       pal.panelMat = null;
       pal.exitMat = null;
-      pal.strutMat = null;
-      pal.strutGeo = null;
+      pal.closeMat = null;
       pal.panelCanvas = null;
       pal.panelTex = null;
       pal.exitCanvas = null;
       pal.exitTex = null;
+      pal.closeCanvas = null;
+      pal.closeTex = null;
       pal.slots = [];
+      pal.pill.group = null;
+      pal.pill.mat = null;
     };
-  }, [scene, rt]);
+  }, [mode, scene, rt]);
 
   /* ---- THE frame loop (immortal, sectioned) ---- */
 
@@ -3032,7 +3213,6 @@ function MrWorld({
             mrBridge.diag.joints[side] = pool.count;
             h.joints = pool.count;
             h.seen = pool.count >= 5;
-            if (h.seen) rt.palette.handsEver = true;
 
             // pinch (joint-distance, hysteresis)
             if (thumb && index) {
@@ -3198,6 +3378,22 @@ function MrWorld({
               }
             }
             updateCollider(cp, got ? cp.pos : null, dt);
+            // window-toggle buttons (X/Y/A/B + extras) — edge-detected
+            const gp = (src as XRInputSource).gamepad;
+            if (gp && gp.buttons) {
+              for (const bi of TOGGLE_BTN_INDICES) {
+                if (bi >= gp.buttons.length) continue;
+                const pressed = !!gp.buttons[bi]?.pressed;
+                const was = cp.menuButtons.has(bi);
+                if (pressed) cp.menuButtons.add(bi);
+                else cp.menuButtons.delete(bi);
+                if (pressed && !was && now > rt.palette.toggleCdUntil) {
+                  rt.palette.toggleCdUntil = now + TOGGLE_COOLDOWN_S * 1000;
+                  rt.palette.open = !rt.palette.open;
+                  hapticPulse(src, 0.5, 70);
+                }
+              }
+            }
           }
           // hands that vanished entirely must not keep stale gesture state
           for (const side of sides) {
@@ -3227,105 +3423,57 @@ function MrWorld({
         }
       }
 
-      /* ---- palette: side selection, pose, hover, exit-hold ---- */
-      safe("palette", () => {
+      /* ---- holo window: summon/open-close animation, hover, holds, pill ---- */
+      safe("window", () => {
         const pal = rt.palette;
-        const wantLeft = handPools.left.count >= PAL_MIN_JOINTS;
-        const wantRight = handPools.right.count >= PAL_MIN_JOINTS;
-        let side: PaletteRt["side"] = null;
-        if (mode === "preview") {
-          side = "virtual";
-        } else if (pal.side === "left" || pal.side === "right") {
-          const curOk = pal.side === "left" ? wantLeft : wantRight;
-          if (curOk) {
-            side = pal.side;
-          } else {
-            const other: HandSide = pal.side === "left" ? "right" : "left";
-            const otherOk = other === "left" ? wantLeft : wantRight;
-            if (otherOk && pal.candidate !== other) {
-              pal.candidate = other;
-              pal.candidateSince = now;
-            }
-            if (
-              otherOk &&
-              pal.candidate === other &&
-              now - pal.candidateSince > PAL_SWITCH_MS
-            ) {
-              side = other;
-            }
-          }
-        } else {
-          if (wantLeft) side = "left";
-          else if (wantRight) side = "right";
-          else if (!pal.handsEver && rt.ctrl.left.seen) side = "ctrl";
-        }
-        if (side === "left" || side === "right") pal.candidate = null;
-        pal.side = side;
 
-        // target pose
-        let havePose = false;
-        if (side === "virtual") {
-          pal.targetPos.set(-0.3, -0.16, -0.52).applyQuaternion(rt.camQuat).add(rt.camPos);
-          tmp.m4.lookAt(rt.camPos, pal.targetPos, tmp.up);
-          pal.targetQuat.setFromRotationMatrix(tmp.m4);
-          havePose = true;
-        } else if (side === "ctrl") {
-          pal.targetPos.copy(rt.ctrl.left.pos).add(tmp.v1.set(0, 0.13, 0));
-          tmp.m4.lookAt(rt.camPos, pal.targetPos, tmp.up);
-          pal.targetQuat.setFromRotationMatrix(tmp.m4);
-          havePose = true;
-        } else if (side) {
-          const h = rt.hands[side];
-          if (h.palm.valid) {
-            pal.targetPos.copy(h.palm.center).addScaledVector(h.palm.normal, PAL_LIFT);
-            tmp.v1.copy(h.palm.fwd);
-            tmp.v2.copy(h.palm.normal);
-            tmp.v1.addScaledVector(tmp.v2, -tmp.v1.dot(tmp.v2));
-            if (tmp.v1.lengthSq() < 1e-6) tmp.v1.set(1, 0, 0);
+        // open/close edge: place the window fresh in front of the head
+        if (pal.open !== pal.wasOpen) {
+          pal.wasOpen = pal.open;
+          if (pal.open) {
+            tmp.v1.set(0, 0, -1).applyQuaternion(rt.camQuat);
+            tmp.v1.y = 0;
+            if (tmp.v1.lengthSq() < 1e-4) tmp.v1.set(0, 0, -1);
             tmp.v1.normalize();
-            tmp.v3.crossVectors(tmp.v1, tmp.v2).normalize();
-            tmp.m4.makeBasis(tmp.v3, tmp.v1, tmp.v2);
-            pal.targetQuat.setFromRotationMatrix(tmp.m4);
-            havePose = true;
+            pal.pos.set(
+              rt.camPos.x + tmp.v1.x * WIN_DIST,
+              WIN_HEIGHT,
+              rt.camPos.z + tmp.v1.z * WIN_DIST
+            );
+            // upright, facing the head
+            tmp.m4.lookAt(
+              tmp.v2.set(rt.camPos.x, WIN_HEIGHT, rt.camPos.z),
+              pal.pos,
+              tmp.up
+            );
+            pal.quat.setFromRotationMatrix(tmp.m4);
+            mrAudio.winOpen();
+          } else if (pal.openT > 0.1) {
+            mrAudio.winClose();
           }
         }
-        const k = dampK(14, dt);
-        if (havePose || pal.opacity > 0.02) {
-          pal.pos.lerp(pal.targetPos, k);
-          pal.quat.slerp(pal.targetQuat, k);
-        }
-        pal.opacity += ((havePose ? 1 : 0) - pal.opacity) * dampK(8, dt);
-        pal.scale = 0.92 + 0.08 * pal.opacity;
+        // animated open factor
+        pal.openT += ((pal.open ? 1 : 0) - pal.openT) * dampK(16, dt);
+        if (!pal.open && pal.openT < 0.004) pal.openT = 0;
+        if (pal.open && pal.openT > 0.996) pal.openT = 1;
+        pal.opacity = pal.openT;
+        pal.scale = 0.9 + 0.1 * pal.openT;
         if (pal.group) {
           pal.group.position.copy(pal.pos);
           pal.group.quaternion.copy(pal.quat);
           pal.group.scale.setScalar(pal.scale);
-          pal.group.visible = pal.opacity > 0.03;
+          pal.group.visible = pal.openT > 0.03;
         }
-        if (pal.panelMat) pal.panelMat.opacity = 0.95 * pal.opacity;
-        if (pal.exitMat) pal.exitMat.opacity = 0.95 * pal.opacity;
-        if (pal.strutMat) pal.strutMat.opacity = 0.35 * pal.opacity;
-        if (pal.strutGeo) {
-          const attr = pal.strutGeo.getAttribute("position") as THREE.BufferAttribute;
-          if (side === "left" || side === "right") {
-            const h = rt.hands[side];
-            attr.setXYZ(0, h.palm.center.x, h.palm.center.y, h.palm.center.z);
-          } else if (side === "ctrl") {
-            attr.setXYZ(0, rt.ctrl.left.pos.x, rt.ctrl.left.pos.y, rt.ctrl.left.pos.z);
-          } else {
-            attr.setXYZ(0, pal.pos.x, pal.pos.y, pal.pos.z);
-          }
-          attr.setXYZ(1, pal.pos.x, pal.pos.y, pal.pos.z);
-          attr.needsUpdate = true;
-          pal.strutGeo.computeBoundingSphere();
-        }
+        if (pal.panelMat) pal.panelMat.opacity = 0.95 * pal.openT;
+        if (pal.exitMat) pal.exitMat.opacity = 0.95 * pal.openT;
+        if (pal.closeMat) pal.closeMat.opacity = 0.95 * pal.openT;
 
         // slot pulse decay + hover
         for (let i = 0; i < pal.slotPulse.length; i++) {
           pal.slotPulse[i] = Math.max(0, pal.slotPulse[i] - dt * 3.5);
         }
         pal.hoverSlot = -1;
-        if (pal.opacity > 0.6) {
+        if (pal.openT > 0.6) {
           if (mode === "xr") {
             let bestD = SLOT_GRAB_R;
             const testPoint = (pt: THREE.Vector3) => {
@@ -3353,14 +3501,14 @@ function MrWorld({
               tmp.ray.setFromCamera(pi.ndc, camera);
               const ro = tmp.ray.ray.origin;
               const rd = tmp.ray.ray.direction;
-              let best = 0.024;
+              let best = 0.05;
               for (let i = 0; i < SLOT_LOCAL.length; i++) {
                 tmp.slotWorld
                   .copy(SLOT_LOCAL[i])
                   .multiplyScalar(pal.scale)
                   .applyQuaternion(pal.quat)
                   .add(pal.pos);
-                const d = raySphereDist(ro, rd, tmp.slotWorld, 0.024);
+                const d = raySphereDist(ro, rd, tmp.slotWorld, 0.05);
                 if (d >= 0 && d < best) {
                   best = d;
                   pal.hoverSlot = i;
@@ -3370,7 +3518,24 @@ function MrWorld({
           }
         }
 
-        // exit hold
+        // ✕ CLOSE hold (window only)
+        let holdingClose = false;
+        if (pal.closeSide && rt.holds[pal.closeSide].close && !rt.holds[pal.closeSide].part) {
+          holdingClose = true;
+          pal.closeProgress += dt / CLOSE_HOLD_S;
+          if (now - pal.closeTickAt > 120) {
+            pal.closeTickAt = now;
+            mrAudio.exitTick(pal.closeProgress);
+            hapticPulse(rt.sources[pal.closeSide], 0.25, 30);
+          }
+          if (pal.closeProgress >= 1) {
+            pal.open = false;
+            holdingClose = false;
+          }
+        }
+        if (!holdingClose) pal.closeProgress = Math.max(0, pal.closeProgress - dt * 2.5);
+
+        // session EXIT hold
         let holdingExit = false;
         if (pal.exitSide && rt.holds[pal.exitSide].exit && !rt.holds[pal.exitSide].part) {
           holdingExit = true;
@@ -3390,7 +3555,7 @@ function MrWorld({
 
         // texture redraws (keyed)
         const pulsesKey = pal.slotPulse.map((p) => (p > 0.35 ? 1 : 0)).join("");
-        const key = `${pal.hoverSlot}:${Math.round(pal.exitProgress * 12)}:${pulsesKey}`;
+        const key = `${pal.hoverSlot}:${Math.round(pal.exitProgress * 12)}:${Math.round(pal.closeProgress * 12)}:${pulsesKey}`;
         if (key !== pal.texKey) {
           pal.texKey = key;
           if (pal.panelCanvas && pal.panelTex) {
@@ -3401,18 +3566,49 @@ function MrWorld({
             drawExitTexture(pal.exitCanvas, pal.exitProgress);
             pal.exitTex.needsUpdate = true;
           }
+          if (pal.closeCanvas && pal.closeTex) {
+            drawCloseTexture(pal.closeCanvas, pal.closeProgress);
+            pal.closeTex.needsUpdate = true;
+          }
         }
 
         // miniature hover glow
         for (let i = 0; i < pal.slots.length; i++) {
           const s = pal.slots[i];
           const g = Math.max(i === pal.hoverSlot ? 0.9 : 0, pal.slotPulse[i]);
-          s.fill.opacity = (0.15 + 0.15 * g) * pal.opacity;
-          s.wire.opacity = (0.55 + 0.4 * g) * pal.opacity;
+          s.fill.opacity = (0.15 + 0.15 * g) * pal.openT;
+          s.wire.opacity = (0.55 + 0.4 * g) * pal.openT;
           s.fill.emissiveIntensity = 0.3 + 0.5 * g;
           const wob = 1 + (g > 0 ? 0.06 * Math.sin(rt.time * 6 + i) * g : 0);
           s.group.scale.setScalar(wob);
         }
+
+        // hands-only ☰ summon pill — floats above the LEFT palm while the
+        // window is closed and no controller has ever been seen
+        const pill = pal.pill;
+        const pillWanted =
+          mode === "xr" &&
+          !pal.open &&
+          pal.openT < 0.2 &&
+          !rt.ctrl.left.seen &&
+          !rt.ctrl.right.seen &&
+          rt.hands.left.palm.valid;
+        if (pillWanted) {
+          tmp.v1.copy(rt.hands.left.palm.center).addScaledVector(rt.hands.left.palm.normal, PILL_LIFT);
+          const kp = dampK(14, dt);
+          pill.pos.lerp(tmp.v1, kp);
+          tmp.m4.lookAt(rt.camPos, pill.pos, tmp.up);
+          tmp.q1.setFromRotationMatrix(tmp.m4);
+          pill.quat.slerp(tmp.q1, kp);
+        }
+        pill.opacity += ((pillWanted ? 1 : 0) - pill.opacity) * dampK(8, dt);
+        if (pill.group) {
+          pill.group.position.copy(pill.pos);
+          pill.group.quaternion.copy(pill.quat);
+          pill.group.visible = pill.opacity > 0.04;
+          pill.group.scale.setScalar(0.9 + 0.1 * pill.opacity);
+        }
+        if (pill.mat) pill.mat.opacity = 0.95 * pill.opacity;
       });
 
       /* ---- grab edges (hands, controllers, preview mouse) ---- */
@@ -3818,20 +4014,54 @@ function MrWorld({
           // the two-hand gesture drives the build directly — no spring
           if (th.active && part.cluster === th.cluster) continue;
           sandbox.holdUpdate(dt, part, hold.anchor, hold.anchorVel, side);
-          // snap while held: magnetic assist + click into place when flush
+          // snap while held: face magnets (position + rotation) pull the
+          // part flush and square, then it clicks home the moment it's close
           const cand = sandbox.snapSearch(part, false);
           if (cand) {
             sandbox.partWorld(cand.target, tmp.v1, tmp.q1);
-            sandbox.partWorld(part, tmp.v2, tmp.q1);
-            tmp.v3.copy(tmp.v1).sub(tmp.v2);
-            const dl = tmp.v3.length();
-            if (dl > 0.004) {
+            sandbox.partWorld(part, tmp.v2, tmp.q2);
+            // world face centres + normals
+            const tcScale = cand.target.cluster.scale;
+            const mcScale = part.cluster.scale;
+            tmp.v3
+              .copy(cand.tf.c)
+              .multiplyScalar(tcScale)
+              .applyQuaternion(tmp.q1)
+              .add(tmp.v1); // target face centre
+            tmp.v4
+              .copy(cand.mf.c)
+              .multiplyScalar(mcScale)
+              .applyQuaternion(tmp.q2)
+              .add(tmp.v2); // moving face centre
+            // positional magnet: moving face centre → target face centre
+            tmp.v5.copy(tmp.v3).sub(tmp.v4);
+            const dl = tmp.v5.length();
+            if (dl > 0.002) {
               part.cluster.vel.addScaledVector(
-                tmp.v3.multiplyScalar(1 / dl),
-                Math.min(1.6, MAGNET_ACC * dt)
+                tmp.v5.multiplyScalar(1 / dl),
+                Math.min(2.4, MAGNET_ACC * dt)
               );
             }
-            if (cand.lat < SNAP_ENGAGE_LAT && Math.abs(cand.along) < SNAP_ENGAGE_ALONG) {
+            // rotational magnet: angular velocity toward flush alignment
+            tmp.v6.copy(cand.mf.n).applyQuaternion(tmp.q2); // moving face normal
+            tmp.v7.copy(cand.tf.n).applyQuaternion(tmp.q1); // target face normal
+            tmp.v8.copy(tmp.v7).negate(); // wanted direction for mfn
+            tmp.q3.setFromUnitVectors(tmp.v6, tmp.v8);
+            const w = Math.min(1, Math.abs(tmp.q3.w));
+            const angErr = 2 * Math.acos(w);
+            if (angErr > 0.01) {
+              const s = Math.sqrt(Math.max(1e-10, 1 - w * w));
+              tmp.v6.set(tmp.q3.x / s, tmp.q3.y / s, tmp.q3.z / s); // axis
+              tmp.v6.multiplyScalar(Math.min(6, angErr * ROT_MAG));
+              part.cluster.angVel.lerp(tmp.v6, Math.min(1, dampK(12, dt)));
+            } else {
+              part.cluster.angVel.multiplyScalar(1 - Math.min(1, dampK(12, dt)));
+            }
+            if (
+              cand.lat < SNAP_ENGAGE_LAT &&
+              Math.abs(cand.along) < SNAP_ENGAGE_ALONG &&
+              angErr < SNAP_ENGAGE_ANG
+            ) {
               sandbox.doSnap(cand, side);
               releaseHold(side, { silent: true, cooldown: 350, noImpulse: true });
               continue;
@@ -4065,9 +4295,13 @@ function MrWorld({
         }
 
         // DOM-side commands
-        if (mrBridge.commands.clearParts !== rt.cmdSeen) {
-          rt.cmdSeen = mrBridge.commands.clearParts;
+        if (mrBridge.commands.clearParts !== rt.cmdSeen.clear) {
+          rt.cmdSeen.clear = mrBridge.commands.clearParts;
           sandbox.clear();
+        }
+        if (mrBridge.commands.toggleWindow !== rt.cmdSeen.toggle) {
+          rt.cmdSeen.toggle = mrBridge.commands.toggleWindow;
+          rt.palette.open = !rt.palette.open;
         }
 
         // debug snapshot (~7Hz) for the watchdogs + dev E2E
@@ -4083,6 +4317,12 @@ function MrWorld({
               .add(pal.pos);
             slotsOut.push([tmp.slotWorld.x, tmp.slotWorld.y, tmp.slotWorld.z]);
           }
+          tmp.exitWorld
+            .copy(CLOSE_POS)
+            .multiplyScalar(pal.scale)
+            .applyQuaternion(pal.quat)
+            .add(pal.pos);
+          const closePosOut: [number, number, number] = [tmp.exitWorld.x, tmp.exitWorld.y, tmp.exitWorld.z];
           tmp.exitWorld
             .copy(EXIT_POS)
             .multiplyScalar(pal.scale)
@@ -4125,10 +4365,13 @@ function MrWorld({
             partsList,
             clustersList,
             twoHand: { active: rt.twoHand.active, scale: rt.twoHand.cluster?.scale ?? 1 },
-            palUp: [tmp.v1.x, tmp.v1.y, tmp.v1.z],
+            winOpen: pal.openT > 0.5,
+            winPos: [pal.pos.x, pal.pos.y, pal.pos.z] as [number, number, number],
+            pillUp: pal.pill.opacity > 0.5,
             held: { left: rt.holds.left.part !== null, right: rt.holds.right.part !== null },
-            palette: { side: pal.side, visible: pal.opacity > 0.5 },
+            window: { open: pal.open, openT: +pal.openT.toFixed(2) },
             slots: slotsOut,
+            closePos: closePosOut,
             exitPos: [tmp.exitWorld.x, tmp.exitWorld.y, tmp.exitWorld.z],
             gestures: {
               pinchL: rt.hands.left.pinch.active || rt.hands.left.pinch.selectActive,

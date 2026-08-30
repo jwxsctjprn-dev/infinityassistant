@@ -1,5 +1,5 @@
 /**
- * Infinity — mixed-reality bridge (v2.2.0 "The Gesture Update").
+ * Infinity — mixed-reality bridge (v2.3.0 "The Workshop Window").
  *
  * The WebXR scene runs inside a three.js render loop that must never
  * re-render React on every frame; this tiny mutable singleton is the
@@ -41,7 +41,7 @@ export interface MrBridge {
   firstFrameAt: number;
   diag: MrDiag;
   /** Commands INTO the scene. Counters — the scene applies each change once. */
-  commands: { clearParts: number };
+  commands: { clearParts: number; toggleWindow: number };
   /** DEV-ONLY live scene snapshot for automated E2E assertions. */
   debug?: {
     /** build marker (grep live bundles for deployment verification) */
@@ -63,12 +63,16 @@ export interface MrBridge {
     }>;
     /** two-hand scale & twist gesture state */
     twoHand: { active: boolean; scale: number };
-    /** the palette panel's world up axis (part +Y at spawn) */
-    palUp: [number, number, number];
+    /** holo window state + world position */
+    winOpen: boolean;
+    winPos: [number, number, number];
+    /** hands-only ☰ summon pill visible */
+    pillUp: boolean;
     held: { left: boolean; right: boolean };
-    palette: { side: string | null; visible: boolean };
-    /** world positions of the 8 palette shape slots */
+    window: { open: boolean; openT: number };
+    /** world positions of the 8 window shape slots */
     slots: Array<[number, number, number]>;
+    closePos: [number, number, number];
     exitPos: [number, number, number];
     gestures: {
       pinchL: boolean;
@@ -123,7 +127,7 @@ export const mrBridge: MrBridge = {
     lastError: null,
     stallAt: 0,
   },
-  commands: { clearParts: 0 },
+  commands: { clearParts: 0, toggleWindow: 0 },
 };
 
 /* ------------------------------------------------------------------ */

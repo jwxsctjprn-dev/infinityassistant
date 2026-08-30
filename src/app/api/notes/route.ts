@@ -14,7 +14,7 @@
  *   Any handler failure → 500 { error: string }
  */
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/lib/db";
+import { getDb } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,6 +43,7 @@ function readId(value: unknown): string {
 
 export async function GET() {
   try {
+    const db = getDb();
     const notes = await db.note.findMany({ orderBy: { createdAt: "desc" } });
     return NextResponse.json({ notes });
   } catch (err) {
@@ -53,6 +54,7 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
+    const db = getDb();
     const payload = await readPayload(req);
     const note = await db.note.create({ data: { body: clampBody(payload.body) } });
     return NextResponse.json({ note });
@@ -64,6 +66,7 @@ export async function POST(req: NextRequest) {
 
 export async function PUT(req: NextRequest) {
   try {
+    const db = getDb();
     const payload = await readPayload(req);
     const id = readId(payload.id);
     if (!id) {
@@ -86,6 +89,7 @@ export async function PUT(req: NextRequest) {
 
 export async function DELETE(req: NextRequest) {
   try {
+    const db = getDb();
     const payload = await readPayload(req);
     const id = readId(payload.id);
     if (!id) {

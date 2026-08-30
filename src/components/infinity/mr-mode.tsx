@@ -179,20 +179,24 @@ export function MrMode({ onExit }: { onExit: () => void }) {
     mrBridge.commands.clearParts++;
   }, []);
 
+  const toggleWindow = useCallback(() => {
+    mrBridge.commands.toggleWindow++;
+  }, []);
+
   const events: MrSceneEvents = {
     onExit: exitMr,
     onParts: setPartCount,
   };
 
   // The slim DOM bar: flat screens (preview) and browsers that granted
-  // dom-overlay. Inside the headset the palm palette carries everything.
+  // dom-overlay. Inside the headset the holo window carries everything.
   const domOverlay = !!sessionInfo?.domOverlay;
   const showDomUi = mode === "preview" || (mode === "xr" && domOverlay && status === "active");
 
   const statusText =
     mode === "preview"
       ? "CLICK A SHAPE TO GRAB · CLICK A HOLOGRAM TO HOLD · X / WHEEL SPINS"
-      : "20 GESTURES: PINCH & RIP · FIST GRAB · ✌ SWIPE SPIN/TUMBLE · PALM THRUST PUSH · SNAP-PULL SUMMON · ☝ FLICK · TWO-HAND SCALE · TAP-TAP CLONE · PALM CLAP CRUSH · STILL PALM STABILIZE · SHAKE RECOLOR · HURL TO DESPAWN";
+      : "PRESS X / Y / A / B FOR THE HOLO WINDOW · 20 GESTURES: PINCH & RIP · FIST GRAB · ✌ SWIPE SPIN · PALM THRUST PUSH · SNAP-PULL SUMMON · ☝ FLICK · TWO-HAND SCALE · TAP-TAP CLONE · PALM CLAP CRUSH · STABILIZE · SHAKE RECOLOR · HURL TO DESPAWN";
 
   return (
     <div className="fixed inset-0 z-50 select-none overflow-hidden bg-black text-zinc-100">
@@ -226,6 +230,18 @@ export function MrMode({ onExit }: { onExit: () => void }) {
               <span className="rounded-full border border-sky-300/20 bg-black/45 px-4 py-2 text-[10px] font-light uppercase tracking-[0.26em] text-sky-200/80 backdrop-blur-md">
                 {statusText}
               </span>
+              <button
+                type="button"
+                onClick={toggleWindow}
+                aria-label="Toggle the holograms window"
+                title="Toggle the holograms window"
+                className="pointer-events-auto flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-white/10 bg-black/45 px-3.5 text-[11px] font-light uppercase tracking-[0.2em] text-zinc-300 backdrop-blur-md transition-colors hover:border-sky-300/40 hover:text-zinc-100"
+              >
+                <span className="text-[13px] leading-none tracking-[0.1em]" aria-hidden="true">
+                  ☰
+                </span>
+                WINDOW
+              </button>
               <button
                 type="button"
                 onClick={clearAll}
@@ -273,7 +289,7 @@ export function MrMode({ onExit }: { onExit: () => void }) {
                 </p>
                 <p className="mt-3 max-w-xs text-[11px] leading-relaxed text-zinc-500">
                   Allow passthrough and hand tracking when your headset asks.
-                  A holographic palette will appear above your palm.
+                  Press X on your controller for the holograms window.
                 </p>
               </div>
               <span className="block h-6 w-6 animate-spin rounded-full border-2 border-sky-300/30 border-t-sky-300/90" />
@@ -298,11 +314,12 @@ export function MrMode({ onExit }: { onExit: () => void }) {
               Infinity · Holo Sandbox MR
             </DialogTitle>
             <DialogDescription className="text-left text-[13px] leading-relaxed text-zinc-400">
-              A zero-gravity hologram playground in your room. Pull shapes out
-              of a palette on your palm, let them float, snap them together
-              face-to-face like LEGO, and sculpt everything with twenty hand
-              gestures — force pushes, flicks, two-hand scaling, clones and
-              more. No AI, just you and whatever you build.
+              A zero-gravity hologram playground in your room. Summon a big
+              holograms window with a controller button, rip shapes out of
+              it, snap them together face-to-face like LEGO, and sculpt
+              everything with twenty hand gestures — force pushes, flicks,
+              two-hand scaling, clones and more. No AI, just you and
+              whatever you build.
             </DialogDescription>
           </DialogHeader>
 
@@ -314,9 +331,10 @@ export function MrMode({ onExit }: { onExit: () => void }) {
             </li>
             <li className="flex gap-2.5">
               <Square className="mt-0.5 h-3 w-3 shrink-0 text-sky-300/70" aria-hidden="true" />
-              <span className="text-zinc-100">Meta hand tracking</span> puts the palette on your
-              palm — pinch a shape and pull it out, then build with twenty
-              hand gestures.
+              Press <span className="text-zinc-100">X / Y / A / B</span> to summon the
+              holograms window — pinch a shape and pull it out, then build
+              with twenty hand gestures (bare hands get a ☰ pill on the
+              palm).
             </li>
             <li className="flex gap-2.5">
               <Square className="mt-0.5 h-3 w-3 shrink-0 text-sky-300/70" aria-hidden="true" />

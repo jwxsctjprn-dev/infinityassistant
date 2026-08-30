@@ -232,12 +232,21 @@ function installXrMock(): void {
     },
   ];
   // controller sources appear when "held" (Quest adds them on wake)
+  // gamepad exposes the xr-standard button map (0 trigger, 1 squeeze,
+  // 2 X/A, 3 Y/B, 4 thumbstick, 5 thumbrest) — btn() drives them.
+  const makeGamepad = () => ({
+    mapping: "xr-standard",
+    buttons: Array.from({ length: 8 }, () => ({ pressed: false, touched: false, value: 0 })),
+    axes: [0, 0, 0, 0],
+    hapticActuators: [],
+  });
   const controllerSources = (["left", "right"] as const).map((side) => ({
     handedness: side,
     targetRayMode: "tracked-pointer",
     gripSpace: {},
     targetRaySpace: {},
     hand: null,
+    gamepad: makeGamepad(),
   }));
   const inputSources: Array<{
     handedness: string;
@@ -245,6 +254,7 @@ function installXrMock(): void {
     gripSpace: unknown;
     targetRaySpace: { __pose?: MockTransform };
     hand: Map<string, { jointName: string }> | null;
+    gamepad?: unknown;
   }> = [...handSources];
 
   // ---- the XRFrame built fresh for every rAF tick ----
@@ -463,6 +473,13 @@ function installXrMock(): void {
     },
     controllerAt: (side: "left" | "right", x: number, y: number, z: number) => {
       driver.controllerPos[side].set(x, y, z);
+    },
+    // gamepad button press (2 = X/A, 3 = Y/B) — drives the window toggle
+    btn: (side: "left" | "right", index: number, pressed: boolean) => {
+      const gp = controllerSources[side === "left" ? 0 : 1].gamepad;
+      gp.buttons[index].pressed = pressed;
+      gp.buttons[index].touched = pressed;
+      gp.buttons[index].value = pressed ? 1 : 0;
     },
     setHead: (x: number, y: number, z: number, yawDeg = 0) => {
       driver.headPos.set(x, y, z);

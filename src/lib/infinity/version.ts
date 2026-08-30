@@ -6,7 +6,7 @@
  * from this file, so a bump here automatically updates the whole UI.
  */
 
-export const APP_VERSION = "2.2.0";
+export const APP_VERSION = "2.3.0";
 
 export interface Release {
   version: string;
@@ -18,6 +18,19 @@ export interface Release {
 
 /** Newest release first. */
 export const RELEASES: Release[] = [
+  {
+    version: "2.3.0",
+    date: "2026-08-31",
+    title: "The workshop window",
+    notes: [
+      "The palm palette is gone. In its place: a BIG, flat, upright holographic window that materialises in front of you — press X, Y, A or B on your Touch controllers to summon it, and the same button (or the ✕ hold button) to dismiss it. The Quest ☰ menu button itself belongs to the OS, so the buttons right beside it do the job.",
+      "Building with bare hands? A small ☰ pill floats above your left palm whenever the window is closed and no controller is in sight — pinch it to summon the window.",
+      "Snapping is completely rebuilt. Face magnets now pull a held hologram the last few centimetres AND square it up as it approaches — the part visibly rotates itself flush before it clicks home, so sloppy bring-togethers connect cleanly.",
+      "The capture zone nearly tripled (angle, gap and slide tolerances all widened), the engage radius doubled, and the merged build lands dead still instead of wobbly — a fresh connection reads as one solid piece.",
+      "The old positional magnet used to drag parts INTO each other (overlap); it now pulls face-centre to face-centre, exactly along the seam that will close.",
+      "Every shape slot on the window is a huge, easy target, and the window stays put in the world while you work — no more chasing a panel around your palm.",
+    ],
+  },
   {
     version: "2.2.0",
     date: "2026-08-30",

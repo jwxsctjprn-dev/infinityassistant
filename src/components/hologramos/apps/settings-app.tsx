@@ -50,7 +50,7 @@ export function SettingsApp({ cw, ch }: AppProps): ReactNode {
         color: HOLO.dim,
         spacing: 0.22,
       });
-      holoText(ctx, `HOLOGRAM OS 2.1 · ${HOLOGRAMOS_BUILD}`, w / 2, h - 24, {
+      holoText(ctx, `HOLOGRAM OS 2.2 · ${HOLOGRAMOS_BUILD}`, w / 2, h - 24, {
         size: 16,
         align: "center",
         color: HOLO.ghost,

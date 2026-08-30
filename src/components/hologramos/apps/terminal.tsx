@@ -16,6 +16,7 @@ import { HOLOGRAMOS_BUILD } from "@/lib/hologramos/bridge";
 import { sound } from "@/lib/hologramos/sound";
 import { HOLO, useSurface, holoText } from "@/lib/hologramos/holo-canvas";
 import { HoloKeyboard, keyboardHeight, type HoloKey } from "../holo-keyboard";
+import { useSuit, SUIT_MARKS, SUIT_TINTS, SUIT_PIECES } from "@/lib/hologramos/suit";
 import type { AppProps } from "./registry";
 
 interface Line {
@@ -27,12 +28,15 @@ const HELP: string[] = [
   "COMMANDS — time · date · uptime · battery · fps",
   "            hands · sysinfo · echo <t> · whoami",
   "            open <app> · close · home · clear",
+  "            suit · suit build · suit off",
 ];
 
 export function TerminalApp({ cw, ch }: AppProps): ReactNode {
   const gl = useThree((s) => s.gl);
   const openApp = useOs((s) => s.openApp);
   const closeAll = useOs((s) => s.closeAll);
+  const suitBuild = useSuit((s) => s.build);
+  const suitOff = useSuit((s) => s.disassemble);
   const [lines, setLines] = useState<Line[]>([
     { text: "HOLOGRAM OS TERMINAL · J.A.R.V.I.S CORE", kind: "sys" },
     { text: 'TYPE "HELP" FOR COMMANDS', kind: "sys" },
@@ -124,13 +128,43 @@ export function TerminalApp({ cw, ch }: AppProps): ReactNode {
         push({ text: "GUEST@HOLOGRAMOS — PRIMARY OPERATOR", kind: "out" });
         break;
       case "open": {
-        const apps: AppId[] = ["notes", "terminal", "vitals", "timer", "chrono", "sonics", "settings"];
+        const apps: AppId[] = ["suit", "notes", "terminal", "vitals", "timer", "chrono", "sonics", "settings"];
         if (apps.includes(arg as AppId)) {
           openApp(arg as AppId);
           push({ text: `OPENING ${arg.toUpperCase()}…`, kind: "sys" });
         } else {
           push({ text: `UNKNOWN APP: ${arg || "(NONE)"} — TRY ${apps.join(" · ")}`, kind: "err" });
           sound.error();
+        }
+        break;
+      }
+      case "suit": {
+        const s = useSuit.getState();
+        if (arg === "build" || arg === "on") {
+          suitBuild();
+          push({ text: "FABRICATOR ENGAGED — ASSEMBLING ARMOR…", kind: "sys" });
+        } else if (arg === "off" || arg === "remove" || arg === "disassemble") {
+          suitOff();
+          push({ text: "SUIT DISASSEMBLING…", kind: "sys" });
+        } else {
+          const status =
+            s.phase === "worn"
+              ? `WORN · ${s.clamped}/${SUIT_PIECES} PIECES PER ARM`
+              : s.phase === "building"
+                ? `FORGING · ${s.clamped}/${SUIT_PIECES} CLAMPED`
+                : s.phase === "removing"
+                  ? "DISASSEMBLING…"
+                  : "OFFLINE — STANDBY";
+          push(
+            { text: `SUIT ${status}`, kind: "out" },
+            {
+              text: `${SUIT_MARKS[s.mark].label} · TINT ${SUIT_TINTS[s.tint].label} · REPULSOR ${
+                s.repulsor ? "ARMED" : "OFF"
+              }`,
+              kind: "out",
+            },
+            { text: 'TRY "SUIT BUILD" OR "SUIT OFF"', kind: "out" }
+          );
         }
         break;
       }

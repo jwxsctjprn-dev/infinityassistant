@@ -17,6 +17,7 @@ import { TimerApp } from "./timer";
 import { ChronoApp } from "./chrono";
 import { SonicsApp } from "./sonics";
 import { SettingsApp } from "./settings-app";
+import { SuitMakerApp } from "./suit-maker";
 
 export interface AppProps {
   /** content area size in meters */
@@ -199,7 +200,50 @@ const glyphSettings: GlyphFn = (ctx, s) => {
   ctx.shadowBlur = 0;
 };
 
+const glyphSuit: GlyphFn = (ctx, s) => {
+  ctx.strokeStyle = HOLO.cyan;
+  ctx.lineWidth = s * 0.055;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.shadowColor = HOLO.cyan;
+  ctx.shadowBlur = s * 0.08;
+  // forearm plate (diagonal twin lines)
+  ctx.beginPath();
+  ctx.moveTo(s * 0.28, s * 0.26);
+  ctx.lineTo(s * 0.58, s * 0.56);
+  ctx.moveTo(s * 0.38, s * 0.16);
+  ctx.lineTo(s * 0.68, s * 0.46);
+  ctx.stroke();
+  // elbow joint ring
+  ctx.beginPath();
+  ctx.arc(s * 0.33, s * 0.31, s * 0.055, 0, Math.PI * 2);
+  ctx.stroke();
+  // repulsor palm + emitter
+  ctx.beginPath();
+  ctx.arc(s * 0.68, s * 0.62, s * 0.1, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(s * 0.68, s * 0.62, s * 0.035, 0, Math.PI * 2);
+  ctx.stroke();
+  // fingertip ticks
+  ctx.beginPath();
+  ctx.moveTo(s * 0.78, s * 0.52);
+  ctx.lineTo(s * 0.84, s * 0.46);
+  ctx.moveTo(s * 0.84, s * 0.62);
+  ctx.lineTo(s * 0.9, s * 0.62);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+};
+
 export const APPS: AppDef[] = [
+  {
+    id: "suit",
+    name: "SUIT MAKER",
+    glyph: glyphSuit,
+    w: 0.68,
+    h: 0.6,
+    Component: SuitMakerApp,
+  },
   {
     id: "notes",
     name: "NOTES",

@@ -9,6 +9,7 @@
 import { useEffect, type ReactNode } from "react";
 import { useOs } from "@/lib/hologramos/store";
 import { rt } from "@/lib/hologramos/runtime";
+import { useSuit } from "@/lib/hologramos/suit";
 import { installHoloBridge } from "@/lib/hologramos/bridge";
 import { InputManager } from "./input";
 import { BootSequence } from "./boot";
@@ -16,6 +17,7 @@ import { HomeView } from "./home-view";
 import { AppWindow } from "./app-window";
 import { Hud } from "./hud";
 import { HandsLayer } from "./hands";
+import { SuitLayer } from "./suit-layer";
 
 interface BatteryLike {
   level: number;
@@ -32,6 +34,8 @@ export function HoloOS({ session }: { session: XRSession }): ReactNode {
     rt.resetForSession();
     installHoloBridge();
     useOs.setState({ phase: "boot", windows: [] });
+    // armor config persists, but the suit itself starts each session disassembled
+    useSuit.setState({ phase: "idle", clamped: 0 });
   }, []);
 
   /* battery poller (shared by HUD, vitals, terminal) */
@@ -71,6 +75,7 @@ export function HoloOS({ session }: { session: XRSession }): ReactNode {
       ))}
       <Hud />
       <HandsLayer />
+      <SuitLayer />
     </group>
   );
 }

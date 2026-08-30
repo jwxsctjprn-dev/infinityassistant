@@ -117,7 +117,7 @@ export default function Gate() {
             HOLOGRAM&nbsp;OS
           </h1>
           <p className="text-[10px] font-light uppercase tracking-[0.45em] text-cyan-300/50">
-            system 2.1 · vision
+            system 2.2 · suit forge
           </p>
         </div>
 

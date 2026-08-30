@@ -11,8 +11,9 @@
 
 import { useOs } from "./store";
 import { rt } from "./runtime";
+import { useSuit } from "./suit";
 
-export const HOLOGRAMOS_BUILD = "hologramos-2.1.0-vision";
+export const HOLOGRAMOS_BUILD = "hologramos-2.2.0-suitmaker";
 
 export const holoBridge = {
   build: HOLOGRAMOS_BUILD,
@@ -22,6 +23,7 @@ export const holoBridge = {
   hands: 0,
   hover: null as string | null,
   lastAction: null as null | { type: string; target: string; at: number },
+  suit: null as null | { phase: string; clamped: number; mark: string; tint: string; repulsor: boolean },
 };
 
 let installed = false;
@@ -39,6 +41,9 @@ export function installHoloBridge(): void {
         hands: holoBridge.hands,
         hover: holoBridge.hover,
         lastAction: holoBridge.lastAction,
+        suit: holoBridge.suit
+          ? { ...holoBridge.suit }
+          : null,
         sessionUptimeMs: rt.sessionAt ? Math.round(performance.now() - rt.sessionAt) : 0,
       };
     },
@@ -48,8 +53,25 @@ export function installHoloBridge(): void {
     holoBridge.phase = s.phase;
     holoBridge.windows = s.windows.map((w) => w.app);
   });
+  useSuit.subscribe((s) => {
+    holoBridge.suit = {
+      phase: s.phase,
+      clamped: s.clamped,
+      mark: s.mark,
+      tint: s.tint,
+      repulsor: s.repulsor,
+    };
+  });
   holoBridge.phase = useOs.getState().phase;
   holoBridge.windows = useOs.getState().windows.map((w) => w.app);
+  const s0 = useSuit.getState();
+  holoBridge.suit = {
+    phase: s0.phase,
+    clamped: s0.clamped,
+    mark: s0.mark,
+    tint: s0.tint,
+    repulsor: s0.repulsor,
+  };
 }
 
 /** Record a user interaction for the E2E loop (and dev debugging). */

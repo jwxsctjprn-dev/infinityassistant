@@ -14,6 +14,7 @@ import { rt } from "./runtime";
 import { sound } from "./sound";
 
 export type AppId =
+  | "suit"
   | "notes"
   | "terminal"
   | "vitals"

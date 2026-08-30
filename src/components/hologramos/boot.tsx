@@ -30,7 +30,7 @@ function Wordmark(): ReactNode {
         spacing: 0.42,
         glow: 18,
       });
-      holoText(ctx, "SYSTEM 2.1 · VISION", w / 2, h * 0.68, {
+      holoText(ctx, "SYSTEM 2.2 · SUIT FORGE", w / 2, h * 0.68, {
         size: 22,
         align: "center",
         color: HOLO.dim,

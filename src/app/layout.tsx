@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { Toaster } from "@/components/ui/toaster";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -14,10 +13,11 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Infinity",
-  description: "A voice-first AI companion. Talk naturally, out loud.",
+  title: "Hologram OS",
+  description:
+    "A mixed-reality operating system in passthrough. Vision Pro layout, Iron Man holograms — built for Meta Quest.",
   icons: {
-    icon: "/orb.svg",
+    icon: "/hologramos.svg",
   },
 };
 
@@ -32,7 +32,6 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-black text-foreground`}
       >
         {children}
-        <Toaster />
       </body>
     </html>
   );

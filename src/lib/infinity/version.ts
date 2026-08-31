@@ -6,7 +6,7 @@
  * from this file, so a bump here automatically updates the whole UI.
  */
 
-export const APP_VERSION = "2.4.0";
+export const APP_VERSION = "2.5.0";
 
 export interface Release {
   version: string;
@@ -18,6 +18,19 @@ export interface Release {
 
 /** Newest release first. */
 export const RELEASES: Release[] = [
+  {
+    version: "2.5.0",
+    date: "2026-09-01",
+    title: "Heavyweight",
+    notes: [
+      "Holograms have real weight now. Linear damping went from a gentle drift to a hard brake — release a part and it stops within centimetres instead of sailing across the room — and a new sleep threshold zeroes any residual micro-velocity, so a part at rest stays EXACTLY where you left it, forever.",
+      "Hands no longer shove anything. The graze/slap touch physics (palm + fingertip colliders) is gone entirely — moving your hands through a build, reaching past it, or releasing a part never sends it floating away. Only deliberate grabs and gestures move parts. Force pushes and flicks were re-sized so they still launch builds properly against the new heavy damping.",
+      "Builds are SOLID. Grab any piece of a multi-part build with ONE hand and yank as hard as you like — it can never tear anymore; the whole build just follows your hand. The only way to take one apart is the new TWO-HAND RIP: grab a build with both hands (different pieces) and pull apart hard and wide — it tears in two between your hands, one half per hand, with a separation kick and fresh seams that can snap to new parts.",
+      "Two-hand scaling now reads intent: pull your hands apart SLOWLY and the build grows (as before); a fast yank is treated as a rip attempt instead, so you can never explode a build's scale by accident. Swipe spins and tumbles were re-sized to still give a satisfying quarter-turn under the heavy angular damping.",
+      "Removed the shake-to-recolor gesture (color changing) — builds keep their clean hologram tint.",
+      "Removed the double-tap clone gesture.",
+    ],
+  },
   {
     version: "2.4.0",
     date: "2026-08-31",

@@ -1,9 +1,9 @@
 "use client";
 
 /**
- * Infinity — Mixed Reality scene, v2.3.0 "The Workshop Window".
+ * Infinity — Mixed Reality scene, v2.5.0 "Heavyweight".
  *
- * A zero-gravity hologram playground in passthrough. No desk, no grid,
+ * A weighty hologram playground in passthrough. No desk, no grid,
  * no AI — just you and whatever you build, floating in your room:
  *
  *   • HOLO WINDOW — a big flat holographic window floats in front of
@@ -11,15 +11,17 @@
  *     Touch controllers (the ☰ pill above your palm opens it too when
  *     your hands are tracked bare). Reach out, pinch a shape and
  *     physically RIP it out of the window.
- *   • ZERO-G PHYSICS — every hologram floats with real momentum.
- *     Graze one with a fingertip and it drifts; slap it and it flies.
- *     Pinch (or close a fist around) a part to hold it with a spring;
- *     let go mid-air and it stays there. Throw it and it sails.
+ *   • WEIGHTY PHYSICS — holograms have real weight: heavy damping kills
+ *     drift, and a released build stops dead where you left it (a full
+ *     stop once nearly still). Hands never shove anything — only grabs
+ *     and deliberate gestures move parts.
  *   • LEGO SNAPPING — bring a held hologram face-to-face with another
- *     and they click flush and aligned, becoming ONE rigid piece.
- *     Grab any piece of a build and physically RIP it back apart.
+ *     and they click flush and aligned, becoming ONE rigid piece. A
+ *     build NEVER comes apart by accident — one hand can carry the
+ *     whole thing by any piece. Grab it with BOTH hands and YANK to
+ *     tear it in two, one half per hand. On purpose only.
  *
- * THE GESTURE PACK (twenty ways to touch the holograms):
+ * THE GESTURE PACK (nineteen ways to touch the holograms):
  *   • SCISSORS SPIN — ✌ + swipe left/right: set quarter-turn of drift.
  *   • SCISSORS TUMBLE — ✌ + swipe up/down: forward/backward tumble.
  *   • FORCE PUSH — open palm thrust: a shockwave shoves everything in
@@ -29,16 +31,14 @@
  *   • POINT & FLICK — point at a hologram and flick: precision
  *     telekinesis nudge at range, with a live targeting ray.
  *   • TWO-HAND SCALE & TWIST — grab one build with both fists: pull
- *     the hands apart to grow it, together to shrink it, and rotate
- *     them like a steering wheel to turn the whole build.
- *   • DOUBLE-TAP CLONE — tap a hologram twice with a free index
- *     finger: a perfect copy pops out beside it.
+ *     the hands apart SLOWLY to grow it, together to shrink it, and
+ *     rotate them like a steering wheel to turn the whole build.
+ *   • TWO-HAND RIP — both hands on one build, yanked apart hard: it
+ *     tears in two between your hands, one half each.
  *   • CLAP-CRUSH — sandwich a build between both palms and clap: it
  *     implodes into sparks.
  *   • STABILIZE — hold a still, open palm near a drifting build: it
  *     calms down to a perfect stop.
- *   • SHAKE TO RECOLOR — shake a held build: it cycles through the
- *     hologram tints.
  *   • HARD-THROW DESPAWN — hurl a hologram hard: it sails off in a
  *     spark trail and dissolves.
  *   • WINDOW TOGGLE — X, Y, A or B opens/closes the holo window;
@@ -61,17 +61,24 @@ import {
 import { MR_CYAN, MR_ICE, MR_SKY, mrBridge } from "@/lib/infinity/mr-bridge";
 
 /** Deployment verification marker (grep live bundles for this). */
-const SANDBOX_BUILD = "v2.4.0-solid-joints";
+const SANDBOX_BUILD = "v2.5.0-heavyweight";
 
 /* ------------------------------------------------------------------ */
 /* Tuning constants                                                     */
 /* ------------------------------------------------------------------ */
 
-/** Physics — zero gravity, gentle damping so things drift then settle. */
-const LIN_DAMP = 0.55;
-const ANG_DAMP = 1.7;
+/** Physics — zero gravity but HEAVY: strong damping gives holograms
+ *  real weight. A released part stops within centimetres instead of
+ *  drifting around the room. */
+const LIN_DAMP = 6.5;
+const ANG_DAMP = 9.0;
 const MAX_VEL = 4;
 const MAX_ANG = 6;
+/** Velocities under these die to EXACTLY zero — a part at rest stays
+ *  at rest, no eternal micro-drift, so builds sit precisely where you
+ *  put them. */
+const SLEEP_VEL = 0.02;
+const SLEEP_ANG = 0.045;
 /** Holograms beyond this radius get a soft spring pull back to the user. */
 const KEEP_RADIUS = 1.9;
 const KEEP_PULL = 2.2;
@@ -80,8 +87,15 @@ const KEEP_PULL = 2.2;
 const HOLD_KP = 170;
 const HOLD_KD = 17;
 const HOLD_MAX_ACC = 60;
-/** Pull a part this far past its cluster's grip before it TEARS OFF. */
-const RIP_DIST = 0.11;
+/** Builds are SOLID — one hand can NEVER tear a cluster apart. Only
+ *  the two-hand rip can: both hands grab one build and YANK apart past
+ *  this stretch (m beyond the grab-time hand separation) with this
+ *  separation speed (m/s). Slow deliberate pulls scale the build. */
+const RIP2_STRETCH = 0.13;
+const RIP2_SPEED = 1.2;
+/** Two-hand separation speed above which scaling pauses — a fast pull
+ *  is a rip attempt, not a resize (scale re-syncs when you slow down). */
+const SCALE_SLOW = 0.9;
 
 /** Gesture thresholds (metres, from XR hand joints). */
 const PINCH_CLOSE = 0.025;
@@ -95,11 +109,12 @@ const SWIPE_DIST = 0.13;
 const SWIPE_SPEED = 1.0;
 const SWIPE_WINDOW = 0.26;
 const SWIPE_COOLDOWN = 0.5;
-/** Spin impulse for a swipe (rad/s ≈ a quarter turn with drift settle). */
-const SPIN_IMPULSE = 3.4;
+/** Spin impulse for a swipe — sized against the heavy angular damping
+ *  so a swipe still reads as a solid quarter-turn of motion. */
+const SPIN_IMPULSE = 12;
 /** Scissors tumble: vertical swipe impulse (rad/s, around camera-right). */
 const TUMBLE_DIST = 0.16;
-const TUMBLE_IMPULSE = 3.8;
+const TUMBLE_IMPULSE = 12;
 
 /** Point ☝ (index out, the rest curled). */
 const POINT_EXT = 0.07;
@@ -125,11 +140,6 @@ const PULL_MS = 1100; // summon steering duration
 const SCALE_MIN = 0.35;
 const SCALE_MAX = 2.6;
 
-/** Double-tap clone (free index fingertip). */
-const TAP_RADIUS = 0.075;
-const TAP_GAP_MS = 800;
-const TAP_MAX_SPEED = 1.0;
-
 /** Clap-crush: sandwich a build between both palms and clap. */
 const CLAP_NEAR = 0.22;
 const CLAP_MID = 0.17;
@@ -141,11 +151,6 @@ const STAB_DIST = 0.14;
 const STAB_HOLD_S = 0.4;
 const STAB_COOLDOWN = 0.8;
 
-/** Shake-to-recolor a held build. */
-const SHAKE_WINDOW_MS = 700;
-const SHAKE_FLIPS = 3;
-const SHAKE_SPEED = 0.55;
-
 /** Hard-throw despawn (release speed above this = dissolve in flight). */
 const YEET_SPEED = 3.3;
 const YEET_MS = 0.45;
@@ -154,9 +159,6 @@ const CRUSH_MS = 0.26;
 
 /** Magnetic snap assist (acceleration toward a near-flush face). */
 const MAGNET_ACC = 8.5;
-
-/** Hologram tints (shake a held build to cycle). */
-const TINTS = ["#67e8f9", "#f472b6", "#fbbf24", "#4ade80", "#a78bfa", "#e2e8f0"];
 
 /** Grab spheres. */
 const GRAB_R_PINCH = 0.055;
@@ -388,7 +390,6 @@ for (let cy = 0; cy < 2; cy++) {
 /** The hologram colour — identical to the flat workbench blocks. */
 const HOLO_COLOR = "#67e8f9";
 
-const tmpColor = new THREE.Color();
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 const Z_AXIS = new THREE.Vector3(0, 0, 1);
 
@@ -467,11 +468,6 @@ interface Cluster {
   settleT: number;
   /** uniform body scale (two-hand scale gesture) */
   scale: number;
-  /** shake-to-recolor state */
-  tintIdx: number;
-  tintMix: number;
-  tintFrom: THREE.Color;
-  tintTo: THREE.Color;
   /** stabilize charge (fed by a still palm, decays otherwise) */
   stabT: number;
   stabCdUntil: number;
@@ -491,10 +487,8 @@ type SandboxEvent =
   | "push"
   | "pull"
   | "flick"
-  | "clone"
   | "crush"
   | "stab"
-  | "tint"
   | "tumble"
   | "yeet";
 type HandSide = "left" | "right";
@@ -512,16 +506,10 @@ interface Hold {
   rotPrevQuat: THREE.Quaternion;
   rotPrevValid: boolean;
   rotVel: THREE.Vector3;
-  /** the part released most recently (colliders leave it alone briefly) */
-  recent: Part | null;
-  recentUntil: number;
   /** holding the session EXIT button */
   exit: boolean;
   /** holding the window ✕ CLOSE button */
   close: boolean;
-  /** shake-to-recolor recognizer */
-  shake: { lastDir: number; flips: number[] };
-  tintCdUntil: number;
 }
 
 interface HandRt {
@@ -540,17 +528,14 @@ interface HandRt {
   handQuatValid: boolean;
   grabActive: boolean;
   grabPoint: THREE.Vector3;
-  /** collider spheres: palm + fingertip cluster */
+  /** palm-centre velocity tracker (force push/pull + stabilize feed) */
   colPalm: { pos: THREE.Vector3; prev: THREE.Vector3; vel: THREE.Vector3; seen: boolean };
-  colTip: { pos: THREE.Vector3; prev: THREE.Vector3; vel: THREE.Vector3; seen: boolean };
-  /** index fingertip tracker (flicks + clone taps) */
+  /** index fingertip tracker (flicks + targeting ray) */
   tip: { pos: THREE.Vector3; prev: THREE.Vector3; vel: THREE.Vector3; seen: boolean };
   swipe: { samples: Array<{ t: number; x: number; y: number; z: number }>; cooldownUntil: number };
   pushCdUntil: number;
   pullCdUntil: number;
   flickCdUntil: number;
-  /** double-tap clone recognizer */
-  taps: { cluster: Cluster | null; inside: boolean; at: number };
 }
 
 interface PaletteRt {
@@ -626,14 +611,12 @@ interface Rt {
     push: number;
     pull: number;
     flick: number;
-    clone: number;
     crush: number;
     stab: number;
-    tint: number;
     tumble: number;
     yeet: number;
   };
-  /** two-hand scale & twist state */
+  /** two-hand scale & twist / two-hand rip state */
   twoHand: {
     active: boolean;
     cluster: Cluster | null;
@@ -645,6 +628,9 @@ interface Rt {
     startMid: THREE.Vector3;
     midPrev: THREE.Vector3;
     midVel: THREE.Vector3;
+    /** last hand separation + its smoothed rate (rip detector) */
+    prevDist: number;
+    sepVel: number;
   };
   clapCdUntil: number;
   /** dev trace of the last attemptGrab decision */
@@ -668,12 +654,8 @@ function makeHold(): Hold {
     rotPrevQuat: new THREE.Quaternion(),
     rotPrevValid: false,
     rotVel: new THREE.Vector3(),
-    recent: null,
-    recentUntil: 0,
     exit: false,
     close: false,
-    shake: { lastDir: 0, flips: [] },
-    tintCdUntil: 0,
   };
 }
 
@@ -697,13 +679,11 @@ function makeHandRt(): HandRt {
     grabActive: false,
     grabPoint: new THREE.Vector3(),
     colPalm: { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), seen: false },
-    colTip: { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), seen: false },
     tip: { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), seen: false },
     swipe: { samples: [], cooldownUntil: 0 },
     pushCdUntil: 0,
     pullCdUntil: 0,
     flickCdUntil: 0,
-    taps: { cluster: null, inside: false, at: 0 },
   };
 }
 
@@ -773,10 +753,8 @@ function makeRt(): Rt {
       push: 0,
       pull: 0,
       flick: 0,
-      clone: 0,
       crush: 0,
       stab: 0,
-      tint: 0,
       tumble: 0,
       yeet: 0,
     },
@@ -791,6 +769,8 @@ function makeRt(): Rt {
       startMid: new THREE.Vector3(),
       midPrev: new THREE.Vector3(),
       midVel: new THREE.Vector3(),
+      prevDist: 1,
+      sepVel: 0,
     },
     clapCdUntil: 0,
     grabTrace: "",
@@ -978,10 +958,6 @@ const mrAudio = {
   flick(): void {
     this.blip(900, 1400, 0.05, "square", 0.2);
   },
-  clone(): void {
-    this.blip(520, 660, 0.05, "triangle", 0.4);
-    this.blip(780, 990, 0.06, "triangle", 0.35, 0.06);
-  },
   crush(): void {
     this.noise(0.28, 2200, 120, 0.6);
     this.blip(320, 60, 0.22, "sawtooth", 0.4);
@@ -989,9 +965,6 @@ const mrAudio = {
   stab(): void {
     this.blip(700, 700, 0.08, "sine", 0.3);
     this.blip(1050, 1050, 0.1, "sine", 0.22, 0.05);
-  },
-  tint(): void {
-    this.blip(440, 880, 0.12, "triangle", 0.32);
   },
   tumble(): void {
     this.noise(0.24, 300, 900, 0.32);
@@ -1494,10 +1467,6 @@ class Sandbox {
       boundRadius: shape.bound,
       settleT: 0,
       scale: 1,
-      tintIdx: 0,
-      tintMix: 1,
-      tintFrom: new THREE.Color(HOLO_COLOR),
-      tintTo: new THREE.Color(HOLO_COLOR),
       stabT: 0,
       stabCdUntil: 0,
       dying: null,
@@ -1625,30 +1594,21 @@ class Sandbox {
     return best;
   }
 
-  /** Spring the held part's cluster toward the anchor; rip when yanked.
-   *  With `wrist` steering active the off-centre torque is skipped — the
-   *  wrist owns the build's orientation while it's held. `ripOK` false
-   *  (a snap candidate is live) defers the rip — the face magnet is
-   *  pulling the build toward its mate and must win over the tear-off;
-   *  a real yank leaves the capture zone and re-arms the rip next frame. */
+  /** Spring the held part's cluster toward the anchor. Builds are SOLID:
+   *  one hand can NEVER tear a cluster apart — the whole build just
+   *  follows (only the deliberate two-hand rip splits it). With `wrist`
+   *  steering active the off-centre torque is skipped — the wrist owns
+   *  the build's orientation while it's held. */
   holdUpdate(
     dt: number,
     part: Part,
     anchor: THREE.Vector3,
     anchorVel: THREE.Vector3,
-    side: HandSide,
-    wrist = false,
-    ripOK = true
-  ): "held" | "ripped" {
+    wrist = false
+  ): void {
     const c = part.cluster;
     this.partWorld(part, this.sv1, this.sq1);
     this.sv2.copy(anchor).sub(this.sv1); // stretch vector
-    const stretch = this.sv2.length();
-    if (ripOK && c.parts.length > 1 && stretch > RIP_DIST) {
-      const dir = this.sv2.clone().normalize();
-      this.ripPart(part, dir, anchorVel, side);
-      return "ripped";
-    }
     // velocity of the grab point on the body
     this.sv3.copy(this.sv1).sub(c.pos); // r
     this.sv5.copy(c.angVel).cross(this.sv3).add(c.vel); // point velocity
@@ -1668,53 +1628,6 @@ class Sandbox {
       c.angVel.addScaledVector(this.sv2, dt);
     }
     if (c.angVel.length() > MAX_ANG) c.angVel.setLength(MAX_ANG);
-    return "held";
-  }
-
-  /** Tear `part` out of its cluster (if multi-part) and hand it momentum. */
-  ripPart(part: Part, dir: THREE.Vector3, anchorVel: THREE.Vector3, side: HandSide): void {
-    const old = part.cluster;
-    this.partWorld(part, this.sv1, this.sq1);
-    if (old.parts.length <= 1) {
-      old.vel.copy(anchorVel).addScaledVector(dir, 0.8);
-      return;
-    }
-    const j = old.parts.indexOf(part);
-    if (j >= 0) old.parts.splice(j, 1);
-    old.mass = old.parts.length;
-    old.vel.addScaledVector(dir, -0.35); // reaction kick on the rest
-    this.refreshClusterFaces(old); // the seam face is exposed again
-    const fresh: Cluster = {
-      id: ++this.clusterSeq,
-      parts: [part],
-      pos: this.sv1.clone(),
-      vel: anchorVel.clone().addScaledVector(dir, 1.4),
-      quat: this.sq1.clone(),
-      angVel: new THREE.Vector3(
-        (Math.random() - 0.5) * 1.5,
-        (Math.random() - 0.5) * 1.5,
-        (Math.random() - 0.5) * 1.5
-      ),
-      mass: 1,
-      boundRadius: SHAPE_BY_ID.get(part.type)!.bound,
-      settleT: 0,
-      scale: old.scale,
-      tintIdx: old.tintIdx,
-      tintMix: 1,
-      tintFrom: old.tintTo.clone(),
-      tintTo: old.tintTo.clone(),
-      stabT: 0,
-      stabCdUntil: 0,
-      dying: null,
-      summon: null,
-    };
-    part.cluster = fresh;
-    part.off.set(0, 0, 0);
-    part.offQ.identity();
-    part.settle = null;
-    part.snapCooldownUntil = performance.now() + 650;
-    this.clusters.push(fresh);
-    this.onEvent("rip", this.sv1, side);
   }
 
   release(part: Part, anchorVel: THREE.Vector3, side: HandSide): void {
@@ -1722,90 +1635,87 @@ class Sandbox {
     this.onEvent("release", part.cluster.pos, side);
   }
 
-  /** Clone an entire cluster (double-tap gesture). */
-  cloneCluster(c: Cluster, pos: THREE.Vector3, side?: HandSide): Cluster | null {
-    if (this.parts.length + c.parts.length > MAX_PARTS) {
-      this.onEvent("full", pos, side);
-      return null;
+  /** Tear a multi-part cluster in TWO between the parts held by each
+   *  hand — the deliberate two-hand rip. `a` (the left hand's part) stays
+   *  in the existing cluster, which keeps its origin frame; every part
+   *  nearer to `b` (the right hand's part) moves to a fresh cluster
+   *  rooted at `b`'s world transform. Both halves keep their exact world
+   *  poses; each flies with its own hand's momentum plus a kick along
+   *  the pull axis, and the fresh seam can't instantly re-snap. */
+  ripTwoHand(
+    c: Cluster,
+    a: Part,
+    b: Part,
+    velA: THREE.Vector3,
+    velB: THREE.Vector3,
+    side?: HandSide
+  ): boolean {
+    if (c.parts.length < 2 || a === b) return false;
+    this.partWorld(a, this.sv1, this.sq1);
+    this.partWorld(b, this.sv2, this.sq2);
+    // tear axis: from the kept half toward the ripped half
+    const axis = this.sv3.copy(this.sv2).sub(this.sv1);
+    if (axis.lengthSq() < 1e-8) axis.set(1, 0, 0);
+    axis.normalize();
+    // geometric split: every part goes to the nearer held part
+    const groupB: Part[] = [];
+    for (const p of c.parts.slice()) {
+      if (p === a) continue;
+      if (p === b) {
+        groupB.push(p);
+        continue;
+      }
+      this.partWorld(p, this.sv4, this.sq4);
+      if (this.sv4.distanceTo(this.sv2) < this.sv4.distanceTo(this.sv1)) groupB.push(p);
     }
-    if (c.dying) return null;
+    if (groupB.length === 0 || groupB.length >= c.parts.length) return false;
     const fresh: Cluster = {
       id: ++this.clusterSeq,
       parts: [],
-      pos: pos.clone(),
-      vel: new THREE.Vector3(),
-      quat: c.quat.clone(),
+      pos: this.sv2.clone(),
+      vel: velB.clone().addScaledVector(axis, 1.1),
+      quat: this.sq2.clone(),
       angVel: new THREE.Vector3(
-        (Math.random() - 0.5) * 0.8,
-        (Math.random() - 0.5) * 0.8,
-        (Math.random() - 0.5) * 0.8
+        (Math.random() - 0.5) * 1.2,
+        (Math.random() - 0.5) * 1.2,
+        (Math.random() - 0.5) * 1.2
       ),
-      mass: c.parts.length,
-      boundRadius: c.boundRadius,
+      mass: groupB.length,
+      boundRadius: 0,
       settleT: 0,
       scale: c.scale,
-      tintIdx: c.tintIdx,
-      tintMix: 1,
-      tintFrom: c.tintTo.clone(),
-      tintTo: c.tintTo.clone(),
       stabT: 0,
       stabCdUntil: 0,
       dying: null,
       summon: null,
     };
-    for (const p of c.parts) {
-      const shape = SHAPE_BY_ID.get(p.type)!;
-      const group = new THREE.Group();
-      const fill = new THREE.MeshStandardMaterial({
-        color: p.fill.color.clone(),
-        emissive: p.fill.emissive.clone(),
-        emissiveIntensity: 0.32,
-        transparent: true,
-        opacity: 0.15,
-        roughness: 0.35,
-        metalness: 0.1,
-        depthWrite: false,
-      });
-      const wire = new THREE.MeshBasicMaterial({
-        color: p.wire.color.clone(),
-        transparent: true,
-        opacity: 0.6,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      });
-      const solid = new THREE.Mesh(shape.geo, fill);
-      const shell = new THREE.LineSegments(shape.wire, wire);
-      shell.scale.setScalar(1.004);
-      group.add(solid, shell);
-      group.scale.setScalar(0.001);
-      this.root.add(group);
-      const np: Part = {
-        id: ++this.seq,
-        type: p.type,
-        cluster: fresh,
-        off: p.off.clone(),
-        offQ: p.offQ.clone(),
-        rOff: p.off.clone(),
-        rOffQ: p.offQ.clone(),
-        buried: p.buried.slice(),
-        group,
-        fill,
-        wire,
-        glow: 0,
-        glowTarget: 0,
-        held: false,
-        born: performance.now(),
-        snapCooldownUntil: 0,
-        settle: null,
-      };
-      fresh.parts.push(np);
-      this.parts.push(np);
+    const invFQ = this.sq2.clone().invert();
+    const cd = performance.now() + 650;
+    for (const p of groupB) {
+      this.partWorld(p, this.sv4, this.sq4);
+      p.off.copy(this.sv4).sub(this.sv2).applyQuaternion(invFQ).divideScalar(c.scale);
+      p.offQ.copy(invFQ).multiply(this.sq4);
+      p.rOff.copy(p.off);
+      p.rOffQ.copy(p.offQ);
+      p.settle = null;
+      p.snapCooldownUntil = cd;
+      p.cluster = fresh;
+      fresh.parts.push(p);
+      const k = c.parts.indexOf(p);
+      if (k >= 0) c.parts.splice(k, 1);
     }
-    this.clusters.push(fresh);
+    for (const p of c.parts) p.snapCooldownUntil = cd;
+    // capture before refreshClusterFaces clobbers the scratch registers
+    const mid = this.sv1.clone().add(this.sv2).multiplyScalar(0.5);
+    c.mass = c.parts.length;
+    c.vel.copy(velA).addScaledVector(axis, -0.35); // reaction on the kept half
+    c.stabT = 0;
+    c.summon = null;
+    this.refreshClusterFaces(c); // both seams re-expose as snap targets
     this.refreshClusterFaces(fresh);
-    this.onCount(this.parts.length);
-    this.onEvent("clone", pos, side);
-    return fresh;
+    this.clusters.push(fresh);
+    this.onEvent("rip", mid, side);
+    return true;
   }
 
   /** Start a cluster dying (clap-crush or hard-throw). */
@@ -1825,15 +1735,6 @@ class Sandbox {
     this.onEvent(thrown ? "yeet" : "crush", c.pos);
   }
 
-  /** Advance a cluster's hologram tint (shake gesture). */
-  recolorCluster(c: Cluster, side?: HandSide): void {
-    c.tintIdx = (c.tintIdx + 1) % TINTS.length;
-    c.tintFrom.copy(c.tintTo);
-    c.tintTo.set(TINTS[c.tintIdx]);
-    c.tintMix = 0;
-    this.onEvent("tint", c.pos, side);
-  }
-
   /** Force push: cone impulse away from an open palm. */
   forcePush(from: THREE.Vector3, dir: THREE.Vector3, side?: HandSide): number {
     let hits = 0;
@@ -1846,8 +1747,10 @@ class Sandbox {
       const facing = this.sv1.dot(dir);
       if (facing < PUSH_CONE) continue;
       const power = (1 - d / PUSH_RANGE) * 2.6 + 0.35;
-      c.vel.addScaledVector(dir, power * 0.75);
-      c.vel.addScaledVector(this.sv1, power * 0.35);
+      // heavy damping eats momentum fast — the shove is sized so a force
+      // push still visibly launches builds across the play space
+      c.vel.addScaledVector(dir, power * 1.5);
+      c.vel.addScaledVector(this.sv1, power * 0.55);
       c.angVel.x += (Math.random() - 0.5) * 1.2;
       c.angVel.y += (Math.random() - 0.5) * 1.2;
       if (c.vel.length() > MAX_VEL) c.vel.setLength(MAX_VEL);
@@ -1893,10 +1796,11 @@ class Sandbox {
     const speed = tipVel.length();
     if (speed < 1e-4) return;
     this.sv1.copy(tipVel).multiplyScalar(1 / speed);
-    const power = 1.15 * Math.min(1.4, speed / FLICK_SPEED);
+    // sized against the heavy damping so a flick still nudges hard
+    const power = 2.4 * Math.min(1.4, speed / FLICK_SPEED);
     c.vel.addScaledVector(this.sv1, power);
     this.sv2.copy(hit).sub(c.pos);
-    this.sv3.crossVectors(this.sv2, this.sv1).multiplyScalar(2.2);
+    this.sv3.crossVectors(this.sv2, this.sv1).multiplyScalar(3.2);
     c.angVel.add(this.sv3);
     if (c.vel.length() > MAX_VEL) c.vel.setLength(MAX_VEL);
     if (c.angVel.length() > MAX_ANG) c.angVel.setLength(MAX_ANG);
@@ -2125,47 +2029,6 @@ class Sandbox {
     return minAng(px) + minAng(pz);
   }
 
-  /** A hand/controller sphere pushes holograms around (graze / slap). */
-  pushSphere(
-    pos: THREE.Vector3,
-    vel: THREE.Vector3,
-    radius: number,
-    skipPart: Part | null,
-    softSkip: Part | null = null
-  ): void {
-    for (const c of this.clusters) {
-      if (skipPart && c === skipPart.cluster) continue;
-      if (softSkip && c === softSkip.cluster) continue;
-      if (c.dying) continue;
-      for (const p of c.parts) {
-        this.partWorld(p, this.sv1, this.sq1);
-        const bound = SHAPE_BY_ID.get(p.type)!.bound * c.scale;
-        this.sv2.copy(this.sv1).sub(pos);
-        const d = this.sv2.length();
-        const rr = radius + bound * 0.85;
-        if (d >= rr || d < 1e-6) continue;
-        this.sv2.multiplyScalar(1 / d); // push normal
-        const overlap = rr - d;
-        // positional correction moves the whole cluster (rigid), clamped
-        // so a deep overlap can never catapult a part
-        const corr = Math.min(overlap * 0.5, 0.02);
-        c.pos.addScaledVector(this.sv2, corr);
-        // impulse relative to collider motion
-        this.sv3.copy(this.sv1).sub(c.pos);
-        this.sv4.copy(c.angVel).cross(this.sv3).add(c.vel); // point velocity
-        this.sv4.sub(vel); // relative
-        const vn = this.sv4.dot(this.sv2);
-        if (vn < 0) c.vel.addScaledVector(this.sv2, -vn * 1.35);
-        c.vel.addScaledVector(vel, 0.22);
-        // a little spin from off-centre contact
-        this.sv3.copy(this.sv1).sub(c.pos).cross(this.sv2).multiplyScalar(0.05);
-        c.angVel.add(this.sv3);
-        if (c.angVel.length() > MAX_ANG) c.angVel.setLength(MAX_ANG);
-        if (c.vel.length() > MAX_VEL) c.vel.setLength(MAX_VEL);
-      }
-    }
-  }
-
   /** Spin/tumble the nearest cluster to `point` around `axis`. */
   rotateNearest(
     point: THREE.Vector3,
@@ -2201,8 +2064,6 @@ class Sandbox {
     const nowMs = performance.now();
     const dead: Cluster[] = [];
     for (const c of this.clusters) {
-      // tint sweep (shake-to-recolor)
-      if (c.tintMix < 1) c.tintMix = Math.min(1, c.tintMix + dt * 4);
       if (c.dying) {
         c.dying.t -= dt;
         if (c.dying.thrown && Math.random() < dt * 30) {
@@ -2240,6 +2101,10 @@ class Sandbox {
         c.vel.multiplyScalar(0.55);
         c.angVel.multiplyScalar(0.3);
       }
+      // hard sleep: nearly-still bodies stop EXACTLY still — a part at
+      // rest stays at rest, so builds sit precisely where you left them
+      if (!c.dying && c.vel.lengthSq() < SLEEP_VEL * SLEEP_VEL) c.vel.set(0, 0, 0);
+      if (c.angVel.lengthSq() < SLEEP_ANG * SLEEP_ANG) c.angVel.set(0, 0, 0);
       if (c.vel.length() > MAX_VEL) c.vel.setLength(MAX_VEL);
       if (c.angVel.length() > MAX_ANG) c.angVel.setLength(MAX_ANG);
       c.pos.addScaledVector(c.vel, dt);
@@ -2294,11 +2159,6 @@ class Sandbox {
         visScale *= c.dying.thrown ? Math.min(1, k * 2.2) : Math.pow(k, 0.8);
       }
       p.group.scale.setScalar(visScale);
-      // tint sweep
-      tmpColor.copy(c.tintFrom).lerp(c.tintTo, c.tintMix);
-      p.fill.color.copy(tmpColor);
-      p.fill.emissive.copy(tmpColor);
-      p.wire.color.copy(tmpColor);
       // glow
       const target = p.held ? 1 : p.glowTarget;
       const rate = target > p.glow ? 18 : 6;
@@ -2651,7 +2511,8 @@ function MrWorld({
     [tmp]
   );
 
-  /** Track a collider sphere's velocity from its positions. */
+  /** Track a tracked point's velocity from its positions (palm /
+   *  fingertip velocity — the force gestures feed on it). */
   const updateCollider = useCallback(
     (
       col: { pos: THREE.Vector3; prev: THREE.Vector3; vel: THREE.Vector3; seen: boolean },
@@ -2695,11 +2556,6 @@ function MrWorld({
       hold.rotPrevValid = false;
       hold.rotVel.set(0, 0, 0);
       hold.cooldownUntil = performance.now() + (opts?.cooldown ?? 120);
-      // the releasing hand's colliders must not shove the part it just
-      // let go of (the pinch point sits inside it) — grace period long
-      // enough for natural finger retraction
-      hold.recent = part;
-      hold.recentUntil = performance.now() + 900;
       const sandbox = rt.sandbox;
       if (!sandbox) return;
       part.held = false;
@@ -2962,14 +2818,6 @@ function MrWorld({
           ringFxRef.current?.spawn(at, rt.camQuat, 0.02, 0.09, 0.22, MR_ICE);
           rt.last.flick = performance.now();
           break;
-        case "clone":
-          mrAudio.clone();
-          hapticPulse(rt.sources.left, 0.5, 70);
-          hapticPulse(rt.sources.right, 0.5, 70);
-          sandbox.particles.burst(at, 12, 0.7);
-          ringFxRef.current?.spawn(at, rt.camQuat, 0.03, 0.22, 0.35, MR_ICE);
-          rt.last.clone = performance.now();
-          break;
         case "crush":
           mrAudio.crush();
           hapticPulse(rt.sources.left, 0.9, 160);
@@ -2984,12 +2832,6 @@ function MrWorld({
           if (src) hapticPulse(src, 0.3, 60);
           ringFxRef.current?.spawn(at, rt.camQuat, 0.07, 0.2, 0.4, MR_SKY);
           rt.last.stab = performance.now();
-          break;
-        case "tint":
-          mrAudio.tint();
-          if (src) hapticPulse(src, 0.4, 60);
-          ringFxRef.current?.spawn(at, rt.camQuat, 0.1, 0.26, 0.45, MR_SKY);
-          rt.last.tint = performance.now();
           break;
         case "yeet":
           mrAudio.yeet();
@@ -3474,16 +3316,11 @@ function MrWorld({
               !h.scissors &&
               !h.point;
 
-            // index fingertip tracker (flicks + clone taps)
+            // index fingertip tracker (flicks + targeting ray)
             updateCollider(h.tip, iTip, dt);
 
-            // collider spheres
+            // palm-centre velocity tracker (force gestures feed on it)
             updateCollider(h.colPalm, h.palm.valid ? h.palm.center : null, dt);
-            const tipPt =
-              thumb && index
-                ? tmp.v5.copy(thumb).add(index).multiplyScalar(0.5)
-                : (mTip ?? null);
-            updateCollider(h.colTip, tipPt, dt);
 
             // select-fallback pinch point from the grip pose
             if (h.pinch.selectActive) {
@@ -3784,9 +3621,8 @@ function MrWorld({
           } else if (fisty) {
             h.grabPoint.copy(h.palm.center);
           } else {
-            // open hand: the reach point is the fingertip cluster — this
-            // is also what a slow hand will grab next (soft-skip target)
-            h.grabPoint.copy(h.colTip.seen ? h.colTip.pos : h.palm.center);
+            // open hand: the reach point follows the index fingertip
+            h.grabPoint.copy(h.tip.seen ? h.tip.pos : h.palm.center);
           }
           const active = pinchy || fisty;
           const wasActive = h.grabActive;
@@ -3837,7 +3673,7 @@ function MrWorld({
         }
       });
 
-      /* ---- telekinesis: point targeting ray, flick, double-tap clone ---- */
+      /* ---- telekinesis: point targeting ray + flick ---- */
       safe("telekinesis", () => {
         const line = pointLineRef.current;
         let rayFrom: THREE.Vector3 | null = null;
@@ -3848,7 +3684,7 @@ function MrWorld({
             const h = rt.hands[side];
             if (!h.seen || !h.tip.seen) continue;
             const speed = h.tip.vel.length();
-            // ---- targeting ray + flick (point pose) ----
+            // ---- point targeting ray + flick ☝ ----
             if (h.point) {
               const w = jointAt(side, "wrist");
               if (w) {
@@ -3884,34 +3720,6 @@ function MrWorld({
                     rayTo = tmp.v3.copy(h.tip.pos).addScaledVector(tmp.v1, 0.9).clone();
                   }
                 }
-              }
-            }
-            // ---- double-tap clone (a free index fingertip) ----
-            if (!h.grabActive && !h.point) {
-              const tapPart = speed < TAP_MAX_SPEED ? sandbox.tryGrab(h.tip.pos, TAP_RADIUS) : null;
-              const tp = h.taps;
-              if (tapPart && !tapPart.cluster.dying && !tapPart.cluster.summon) {
-                const cl = tapPart.cluster;
-                if (!tp.inside) {
-                  tp.inside = true;
-                  if (tp.cluster !== cl) {
-                    tp.cluster = cl;
-                    tp.at = now;
-                  } else if (now - tp.at < TAP_GAP_MS) {
-                    // DOUBLE TAP → a perfect copy pops out beside it
-                    tmp.v4.set(0.17, 0.02, 0).applyQuaternion(rt.camQuat);
-                    const fresh = sandbox.cloneCluster(cl, tmp.v5.copy(cl.pos).add(tmp.v4), side);
-                    if (fresh) {
-                      tp.cluster = null;
-                      tp.at = 0;
-                    }
-                  } else {
-                    tp.at = now;
-                  }
-                }
-              } else if (!tapPart) {
-                tp.inside = false;
-                if (tp.cluster && now - tp.at > TAP_GAP_MS * 2) tp.cluster = null;
               }
             }
           }
@@ -4048,7 +3856,7 @@ function MrWorld({
         sandbox.killCluster(victim, false);
       });
 
-      /* ---- holds: two-hand scale/twist, spring follow, shake, snap ---- */
+      /* ---- holds: two-hand scale/twist/rip, spring follow, snap ---- */
       safe("holds", () => {
         // ---- two-hand scale & twist (both hands on ONE build) ----
         const th = rt.twoHand;
@@ -4093,6 +3901,8 @@ function MrWorld({
               th.startMid.copy(la).add(ra).multiplyScalar(0.5);
               th.midPrev.copy(th.startMid);
               th.midVel.set(0, 0, 0);
+              th.prevDist = th.startDist;
+              th.sepVel = 0;
             } else {
               tmp.v1.copy(la).add(ra).multiplyScalar(0.5);
               if (dt > 1e-4) {
@@ -4104,17 +3914,50 @@ function MrWorld({
               tmp.v3.copy(ra).sub(la);
               const dist = Math.max(0.05, tmp.v3.length());
               tmp.v3.multiplyScalar(1 / dist);
-              c.scale = THREE.MathUtils.clamp(
-                (th.startScale * dist) / th.startDist,
-                SCALE_MIN,
-                SCALE_MAX
-              );
-              tmp.q1.setFromUnitVectors(th.startDir, tmp.v3);
-              c.quat.copy(tmp.q1).multiply(th.startQuat).normalize();
-              c.pos.copy(th.startPos).add(tmp.v1).sub(th.startMid);
-              c.vel.copy(th.midVel);
-              c.angVel.multiplyScalar(Math.exp(-8 * dt));
-              c.settleT = 0;
+              // separation rate (smoothed): a SLOW pull scales the build, a
+              // FAST yank is a two-hand rip attempt — scale pauses while
+              // the hands fly apart and re-syncs when they slow down
+              if (dt > 1e-4) {
+                const inst = THREE.MathUtils.clamp((dist - th.prevDist) / dt, -8, 8);
+                th.sepVel += (inst - th.sepVel) * 0.5;
+              }
+              th.prevDist = dist;
+              // TWO-HAND RIP: yank the hands apart past the grab stretch
+              // with real speed and the build tears in two — one half per
+              // hand. Big purpose only; slow pulls never tear.
+              if (
+                c.parts.length >= 2 &&
+                lp !== null &&
+                rp !== null &&
+                lp !== rp &&
+                dist > th.startDist + RIP2_STRETCH &&
+                th.sepVel > RIP2_SPEED &&
+                sandbox.ripTwoHand(
+                  c,
+                  lp,
+                  rp,
+                  rt.holds.left.anchorVel,
+                  rt.holds.right.anchorVel,
+                  "right"
+                )
+              ) {
+                th.active = false;
+                th.cluster = null;
+              } else {
+                if (Math.abs(th.sepVel) < SCALE_SLOW) {
+                  c.scale = THREE.MathUtils.clamp(
+                    (th.startScale * dist) / th.startDist,
+                    SCALE_MIN,
+                    SCALE_MAX
+                  );
+                }
+                tmp.q1.setFromUnitVectors(th.startDir, tmp.v3);
+                c.quat.copy(tmp.q1).multiply(th.startQuat).normalize();
+                c.pos.copy(th.startPos).add(tmp.v1).sub(th.startMid);
+                c.vel.copy(th.midVel);
+                c.angVel.multiplyScalar(Math.exp(-8 * dt));
+                c.settleT = 0;
+              }
             }
           }
         } else if (th.active) {
@@ -4215,10 +4058,9 @@ function MrWorld({
               hold.rotPrevValid = false;
             }
           }
-          // snap candidate FIRST: its magnets steer below, and a live
-          // candidate defers the rip in holdUpdate (magnet > tear-off)
+          // snap candidate FIRST: its magnets steer the held build below
           const cand = sandbox.snapSearch(part, false);
-          sandbox.holdUpdate(dt, part, hold.anchor, hold.anchorVel, side, wristW !== null, !cand);
+          sandbox.holdUpdate(dt, part, hold.anchor, hold.anchorVel, wristW !== null);
           // snap while held: face magnets (position + rotation) pull the
           // part flush and square, then it clicks home the moment it's close
           if (cand) {
@@ -4283,75 +4125,6 @@ function MrWorld({
             // no snap candidate: pure wrist-follow (a still wrist settles it)
             part.cluster.angVel.lerp(wristW, Math.min(1, dampK(12, dt)));
           }
-          // ---- shake-to-recolor ----
-          const sh = hold.shake;
-          const sp = hold.anchorVel.length();
-          if (sp > SHAKE_SPEED && now > hold.tintCdUntil) {
-            const axv = hold.anchorVel;
-            const absX = Math.abs(axv.x);
-            const absY = Math.abs(axv.y);
-            const absZ = Math.abs(axv.z);
-            const axis = absX > absY && absX > absZ ? 0 : absY > absZ ? 1 : 2;
-            const dir = Math.sign(axis === 0 ? axv.x : axis === 1 ? axv.y : axv.z);
-            if (dir !== 0) {
-              if (sh.lastDir !== 0 && dir !== sh.lastDir) {
-                sh.flips.push(now);
-                while (sh.flips.length && now - sh.flips[0] > SHAKE_WINDOW_MS) sh.flips.shift();
-                if (sh.flips.length >= SHAKE_FLIPS) {
-                  sh.flips.length = 0;
-                  sh.lastDir = 0;
-                  hold.tintCdUntil = now + 650;
-                  sandbox.recolorCluster(part.cluster, side);
-                }
-              } else if (sh.lastDir === 0) {
-                sh.flips.length = 0;
-              }
-              sh.lastDir = dir;
-            }
-          } else if (sp < 0.22) {
-            sh.lastDir = 0;
-          }
-        }
-      });
-
-      /* ---- physical hand interaction: graze & slap ---- */
-      safe("colliders", () => {
-        const skipFor = (side: HandSide): Part | null => {
-          const hold = rt.holds[side];
-          if (hold.part) return hold.part;
-          if (hold.recent && performance.now() < hold.recentUntil) return hold.recent;
-          return null;
-        };
-        if (mode === "xr") {
-          for (const side of sides) {
-            const skip = skipFor(side);
-            const h = rt.hands[side];
-            // A CLOSED hand (pinch/fist/holding) is compact and busy — it
-            // does not shove things. Only an OPEN hand grazes (fingertips)
-            // and slaps (flat palm). A SLOW open hand is REACHING for the
-            // hologram nearest its fingertips — that one is left alone so
-            // grabbing is always possible; a fast hand slaps everything.
-            if (!h.grabActive) {
-              const speed = Math.max(
-                h.colPalm.seen ? h.colPalm.vel.length() : 0,
-                h.colTip.seen ? h.colTip.vel.length() : 0
-              );
-              let soft: Part | null = null;
-              if (speed < 0.8 && h.palm.valid) {
-                // reach-protection zone centred on the palm — engages
-                // BEFORE any collider can touch the reached-for part
-                soft = sandbox.tryGrab(h.palm.center, 0.08);
-              }
-              if (h.colPalm.seen)
-                sandbox.pushSphere(h.colPalm.pos, h.colPalm.vel, 0.05, skip, soft);
-              if (h.colTip.seen)
-                sandbox.pushSphere(h.colTip.pos, h.colTip.vel, 0.03, skip, soft);
-            }
-            const cp = rt.ctrl[side];
-            if (cp.seen) sandbox.pushSphere(cp.pos, cp.vel, 0.05, skip);
-          }
-        } else if (rt.vPoint.seen && !rt.holds.right.part) {
-          sandbox.pushSphere(rt.vPoint.pos, rt.vPoint.vel, 0.045, skipFor("right"));
         }
       });
 
@@ -4582,7 +4355,6 @@ function MrWorld({
             id: c.id,
             parts: c.parts.length,
             scale: +c.scale.toFixed(3),
-            tint: c.tintIdx,
             dying: !!c.dying,
             summoned: !!c.summon,
             pos: [c.pos.x, c.pos.y, c.pos.z] as [number, number, number],
@@ -4605,7 +4377,12 @@ function MrWorld({
             clusters: sandbox.clusters.length,
             partsList,
             clustersList,
-            twoHand: { active: rt.twoHand.active, scale: rt.twoHand.cluster?.scale ?? 1 },
+            twoHand: {
+              active: rt.twoHand.active,
+              scale: rt.twoHand.cluster?.scale ?? 1,
+              dist: +rt.twoHand.prevDist.toFixed(3),
+              sepVel: +rt.twoHand.sepVel.toFixed(2),
+            },
             winOpen: pal.openT > 0.5,
             winPos: [pal.pos.x, pal.pos.y, pal.pos.z] as [number, number, number],
             pillUp: pal.pill.opacity > 0.5,
@@ -4633,10 +4410,8 @@ function MrWorld({
             lastPushAt: rt.last.push,
             lastPullAt: rt.last.pull,
             lastFlickAt: rt.last.flick,
-            lastCloneAt: rt.last.clone,
             lastCrushAt: rt.last.crush,
             lastStabAt: rt.last.stab,
-            lastTintAt: rt.last.tint,
             lastTumbleAt: rt.last.tumble,
             lastYeetAt: rt.last.yeet,
             grabTrace: rt.grabTrace,

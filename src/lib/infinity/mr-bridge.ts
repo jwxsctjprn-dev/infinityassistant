@@ -59,12 +59,11 @@ export interface MrBridge {
       buriedFaces: string;
       pos: [number, number, number];
     }>;
-    /** per-cluster bodies: part count, two-hand scale, tint index, velocity */
+    /** per-cluster bodies: part count, two-hand scale, velocity */
     clustersList: Array<{
       id: number;
       parts: number;
       scale: number;
-      tint: number;
       dying: boolean;
       summoned: boolean;
       pos: [number, number, number];
@@ -73,8 +72,8 @@ export interface MrBridge {
       vel: [number, number, number];
       angVel: [number, number, number];
     }>;
-    /** two-hand scale & twist gesture state */
-    twoHand: { active: boolean; scale: number };
+    /** two-hand scale & twist / two-hand rip gesture state */
+    twoHand: { active: boolean; scale: number; dist: number; sepVel: number };
     /** holo window state + world position */
     winOpen: boolean;
     winPos: [number, number, number];
@@ -105,10 +104,8 @@ export interface MrBridge {
     lastPushAt: number;
     lastPullAt: number;
     lastFlickAt: number;
-    lastCloneAt: number;
     lastCrushAt: number;
     lastStabAt: number;
-    lastTintAt: number;
     lastTumbleAt: number;
     lastYeetAt: number;
     grabTrace: string;

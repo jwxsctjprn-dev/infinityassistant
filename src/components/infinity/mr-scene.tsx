@@ -3415,20 +3415,27 @@ function MrWorld({
               h.handQuatValid = false;
             }
 
-            // fist (mean fingertip distance to palm centre)
+            // fist (mean fingertip distance to palm centre). The mean alone
+            // is NOT enough: ✌ scissors and ☝ point keep two/one fingers
+            // fully extended, which dips the MEAN under the fist threshold
+            // without the hand being a fist at all — a ✌ swipe beside a
+            // build would fist-grab it and the swipe would RIP it apart
+            // instead of spinning it. A fist has every finger curled.
             const iTip = jointAt(side, "index-finger-tip");
             const mTip = jointAt(side, "middle-finger-tip");
             const rTip = jointAt(side, "ring-finger-tip");
             const pTip = jointAt(side, "pinky-finger-tip", "little-finger-tip");
-            if (iTip && mTip && rTip && pTip && h.palm.valid) {
+            if (wrist && iTip && mTip && rTip && pTip && h.palm.valid) {
               const mean =
                 (iTip.distanceTo(h.palm.center) +
                   mTip.distanceTo(h.palm.center) +
                   rTip.distanceTo(h.palm.center) +
                   pTip.distanceTo(h.palm.center)) /
                 4;
-              if (!h.fist && mean < FIST_CLOSE) h.fist = true;
-              else if (h.fist && mean > FIST_OPEN) h.fist = false;
+              const fingersCurled =
+                iTip.distanceTo(wrist) < SCISS_EXT && mTip.distanceTo(wrist) < SCISS_EXT;
+              if (!h.fist && mean < FIST_CLOSE && fingersCurled) h.fist = true;
+              else if (h.fist && (mean > FIST_OPEN || !fingersCurled)) h.fist = false;
             } else {
               h.fist = false;
             }
@@ -4552,8 +4559,20 @@ function MrWorld({
               type: p.type,
               cluster: p.cluster.id,
               buried: p.buried.reduce((n, b) => n + (b ? 1 : 0), 0),
+              // label from the face's ACTUAL normal (index order differs
+              // per shape — cylinders carry only ±Y faces, say)
               buriedFaces: p.buried
-                .map((b, i) => (b ? ["+X", "-X", "+Y", "-Y", "+Z", "-Z"][i] : null))
+                .map((b, i) => {
+                  if (!b) return null;
+                  const n = SHAPE_BY_ID.get(p.type)!.faces[i].n;
+                  if (n.x > 0.7) return "+X";
+                  if (n.x < -0.7) return "-X";
+                  if (n.y > 0.7) return "+Y";
+                  if (n.y < -0.7) return "-Y";
+                  if (n.z > 0.7) return "+Z";
+                  if (n.z < -0.7) return "-Z";
+                  return "~";
+                })
                 .filter(Boolean)
                 .join("|"),
               pos: [tmp.v1.x, tmp.v1.y, tmp.v1.z],

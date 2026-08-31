@@ -27,6 +27,7 @@ export const RELEASES: Release[] = [
       "Grab a build anywhere and its OUTER faces do the snapping now, not just the piece you happen to be holding — drag a row of cubes end-first into a new one and the end connects.",
       "Rotate holograms with your hands: keep holding a part and twist your wrist — it turns with you, like a real object. Works with a pinch, a fist, or a controller grip; relax your wrist near a face and the square-up magnet still finishes the alignment for the click.",
       "Snap searches are cheaper (cluster distance prefilter), so big builds hold their framerate on Quest.",
+      "Fixed a gesture mix-up that had been hiding since v2.2.0: a ✌ scissors or ☝ pointing hand averaged out as a FIST to the recogniser (two fingers out + two curled looks like a fist to a mean-distance check). Result: a ✌ swipe next to a build could grab it as a fist and the swipe would RIP it apart instead of spinning it. A fist now requires every finger actually curled.",
       "New dev instrumentation: per-part cluster + weld counts and per-cluster orientation in the live scene snapshot (used by the end-to-end tests for chaining, stacking and wrist rotation).",
     ],
   },

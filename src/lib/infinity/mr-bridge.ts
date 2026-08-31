@@ -1,5 +1,5 @@
 /**
- * Infinity — mixed-reality bridge (v2.3.0 "The Workshop Window").
+ * Infinity — mixed-reality bridge (v2.4.0 "Solid Joints & Wrist Spin").
  *
  * The WebXR scene runs inside a three.js render loop that must never
  * re-render React on every frame; this tiny mutable singleton is the
@@ -48,7 +48,17 @@ export interface MrBridge {
     build: string;
     parts: number;
     clusters: number;
-    partsList: Array<{ id: number; type: string; pos: [number, number, number] }>;
+    partsList: Array<{
+      id: number;
+      type: string;
+      /** owning cluster id — merged builds share one id */
+      cluster: number;
+      /** welded (buried) face count — 1 per snap seam on that part */
+      buried: number;
+      /** which faces are welded, e.g. "-X|+Y" */
+      buriedFaces: string;
+      pos: [number, number, number];
+    }>;
     /** per-cluster bodies: part count, two-hand scale, tint index, velocity */
     clustersList: Array<{
       id: number;
@@ -58,6 +68,8 @@ export interface MrBridge {
       dying: boolean;
       summoned: boolean;
       pos: [number, number, number];
+      /** body orientation (x,y,z,w) — verifies wrist rotation */
+      quat: [number, number, number, number];
       vel: [number, number, number];
       angVel: [number, number, number];
     }>;
@@ -100,6 +112,8 @@ export interface MrBridge {
     lastTumbleAt: number;
     lastYeetAt: number;
     grabTrace: string;
+    /** DEV trace of the last executed snap pair */
+    snapTrace: string;
     diag: {
       frame: number;
       fps: number;

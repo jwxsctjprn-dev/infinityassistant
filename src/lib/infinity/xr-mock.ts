@@ -28,6 +28,8 @@
  *   .setControllers(bool) hold/release controllers (inputsourceschange)
  *   .setJointsReadable(bool) null out getJointPose (joints unreadable)
  *   .handAt(side,x,y,z) move a hand
+ *   .handRot(side,xDeg,yDeg,zDeg) rotate a hand's wrist (joints follow —
+ *                      drives the wrist-follow rotation of held parts)
  *   .controllerAt(side,x,y,z) move a controller (e.g. resting on a desk)
  *   .setHead(x,y,z,yawDeg) move the head/view
  *   .setDomOverlay(bool) pretend dom-overlay was granted
@@ -47,8 +49,8 @@ interface MockDriver {
   /** when false, getJointPose returns null — hand joints unreadable (select fallback still works) */
   jointsReadable: boolean;
   hands: {
-    left: { visible: boolean; pos: THREE.Vector3; pinch: number; curl: number; scissors: number; point: number };
-    right: { visible: boolean; pos: THREE.Vector3; pinch: number; curl: number; scissors: number; point: number };
+    left: { visible: boolean; pos: THREE.Vector3; quat: THREE.Quaternion; pinch: number; curl: number; scissors: number; point: number };
+    right: { visible: boolean; pos: THREE.Vector3; quat: THREE.Quaternion; pinch: number; curl: number; scissors: number; point: number };
   };
   /** controller positions (moved via controllerAt — e.g. resting on a desk) */
   controllerPos: {
@@ -184,8 +186,8 @@ function installXrMock(): void {
     hands: {
       // defaults are HELD at chest height — the palm palette floats above
       // the LEFT hand by default (handAt moves either hand anywhere)
-      left: { visible: true, pos: new THREE.Vector3(-0.25, 1.3, -0.45), pinch: 0, curl: 0, scissors: 0, point: 0 },
-      right: { visible: true, pos: new THREE.Vector3(0.25, 1.3, -0.45), pinch: 0, curl: 0, scissors: 0, point: 0 },
+      left: { visible: true, pos: new THREE.Vector3(-0.25, 1.3, -0.45), quat: new THREE.Quaternion(), pinch: 0, curl: 0, scissors: 0, point: 0 },
+      right: { visible: true, pos: new THREE.Vector3(0.25, 1.3, -0.45), quat: new THREE.Quaternion(), pinch: 0, curl: 0, scissors: 0, point: 0 },
     },
     controllerPos: {
       left: new THREE.Vector3(-0.22, 1.18, -0.38),
@@ -326,7 +328,9 @@ function installXrMock(): void {
           const side = src.handedness as "left" | "right";
           const h = driver.hands[side];
           if (!h.visible) return null;
-          const pos = h.pos.clone().add(jointOffset(joint.jointName, h.pinch, h.curl, h.scissors, h.point));
+          const pos = h.pos
+            .clone()
+            .add(jointOffset(joint.jointName, h.pinch, h.curl, h.scissors, h.point).applyQuaternion(h.quat));
           return { transform: makeTransform(pos, identityQuat) };
         }
         return null;
@@ -467,6 +471,17 @@ function installXrMock(): void {
     },
     handAt: (side: "left" | "right", x: number, y: number, z: number) => {
       driver.hands[side].pos.set(x, y, z);
+    },
+    // rotate the whole hand about its wrist (degrees, XYZ euler) — every
+    // joint rotates with it, so the app's hand frame + wrist-follow see it
+    handRot: (side: "left" | "right", xDeg: number, yDeg: number, zDeg: number) => {
+      driver.hands[side].quat.setFromEuler(
+        new THREE.Euler(
+          THREE.MathUtils.degToRad(xDeg),
+          THREE.MathUtils.degToRad(yDeg),
+          THREE.MathUtils.degToRad(zDeg)
+        )
+      );
     },
     setHandVisible: (side: "left" | "right", b: boolean) => {
       driver.hands[side].visible = b;

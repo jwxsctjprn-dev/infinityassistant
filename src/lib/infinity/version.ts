@@ -6,7 +6,7 @@
  * from this file, so a bump here automatically updates the whole UI.
  */
 
-export const APP_VERSION = "2.3.0";
+export const APP_VERSION = "2.4.0";
 
 export interface Release {
   version: string;
@@ -18,6 +18,18 @@ export interface Release {
 
 /** Newest release first. */
 export const RELEASES: Release[] = [
+  {
+    version: "2.4.0",
+    date: "2026-08-31",
+    title: "Solid joints & wrist spin",
+    notes: [
+      "Chaining works. Every snap now welds its two faces shut — the seam a connection leaves behind is never a snap target again. Connect a cube to the left of a cube, then another to the left of THAT one, and it lands beside it, not inside the first joint; same for stacking — towers grow straight up because the top cube's underside is welded, not some face halfway down the stack.",
+      "Grab a build anywhere and its OUTER faces do the snapping now, not just the piece you happen to be holding — drag a row of cubes end-first into a new one and the end connects.",
+      "Rotate holograms with your hands: keep holding a part and twist your wrist — it turns with you, like a real object. Works with a pinch, a fist, or a controller grip; relax your wrist near a face and the square-up magnet still finishes the alignment for the click.",
+      "Snap searches are cheaper (cluster distance prefilter), so big builds hold their framerate on Quest.",
+      "New dev instrumentation: per-part cluster + weld counts and per-cluster orientation in the live scene snapshot (used by the end-to-end tests for chaining, stacking and wrist rotation).",
+    ],
+  },
   {
     version: "2.3.0",
     date: "2026-08-31",

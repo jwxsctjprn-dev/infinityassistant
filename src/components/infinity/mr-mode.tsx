@@ -196,7 +196,7 @@ export function MrMode({ onExit }: { onExit: () => void }) {
   const statusText =
     mode === "preview"
       ? "CLICK A SHAPE TO GRAB · CLICK A HOLOGRAM TO HOLD · X / WHEEL SPINS"
-      : "PRESS X / Y / A / B FOR THE HOLO WINDOW · 20 GESTURES: PINCH & RIP · FIST GRAB · ✌ SWIPE SPIN · PALM THRUST PUSH · SNAP-PULL SUMMON · ☝ FLICK · TWO-HAND SCALE · TAP-TAP CLONE · PALM CLAP CRUSH · STABILIZE · SHAKE RECOLOR · HURL TO DESPAWN";
+      : "PRESS X / Y / A / B FOR THE HOLO WINDOW · TWIST YOUR WRIST TO ROTATE A HELD PART · 20 GESTURES: PINCH & RIP · FIST GRAB · ✌ SWIPE SPIN · PALM THRUST PUSH · SNAP-PULL SUMMON · ☝ FLICK · TWO-HAND SCALE · TAP-TAP CLONE · PALM CLAP CRUSH · STABILIZE · SHAKE RECOLOR · HURL TO DESPAWN";
 
   return (
     <div className="fixed inset-0 z-50 select-none overflow-hidden bg-black text-zinc-100">

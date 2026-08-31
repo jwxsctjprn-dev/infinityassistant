@@ -61,7 +61,7 @@ import {
 import { MR_CYAN, MR_ICE, MR_SKY, mrBridge } from "@/lib/infinity/mr-bridge";
 
 /** Deployment verification marker (grep live bundles for this). */
-const SANDBOX_BUILD = "v2.3.0-holo-window";
+const SANDBOX_BUILD = "v2.4.0-solid-joints";
 
 /* ------------------------------------------------------------------ */
 /* Tuning constants                                                     */
@@ -437,6 +437,9 @@ interface Part {
   /** render-time offsets (settle animation lerps here) */
   rOff: THREE.Vector3;
   rOffQ: THREE.Quaternion;
+  /** per-shape-face flags: true once another part of the same cluster is
+   *  welded on that face (the seam) — buried faces never snap again */
+  buried: boolean[];
   group: THREE.Group;
   fill: THREE.MeshStandardMaterial;
   wire: THREE.MeshBasicMaterial;
@@ -457,6 +460,9 @@ interface Cluster {
   quat: THREE.Quaternion;
   angVel: THREE.Vector3;
   mass: number;
+  /** local-space radius spanning every part (cluster.pos → farthest
+   *  part bound) — snap-search prefilter; multiply by cluster.scale */
+  boundRadius: number;
   /** settle animation freezes motion briefly after a snap */
   settleT: number;
   /** uniform body scale (two-hand scale gesture) */
@@ -501,6 +507,11 @@ interface Hold {
   anchorVel: THREE.Vector3;
   anchorSeen: boolean;
   cooldownUntil: number;
+  /** wrist-follow rotation: last frame's hand/controller orientation +
+   *  the smoothed angular velocity derived from it (rate control) */
+  rotPrevQuat: THREE.Quaternion;
+  rotPrevValid: boolean;
+  rotVel: THREE.Vector3;
   /** the part released most recently (colliders leave it alone briefly) */
   recent: Part | null;
   recentUntil: number;
@@ -524,6 +535,9 @@ interface HandRt {
   /** nothing pinched, curled, scissored or pointed — a free open hand */
   open: boolean;
   palm: { center: THREE.Vector3; normal: THREE.Vector3; fwd: THREE.Vector3; valid: boolean };
+  /** rigid metacarpal frame of the hand — drives wrist-follow rotation */
+  handQuat: THREE.Quaternion;
+  handQuatValid: boolean;
   grabActive: boolean;
   grabPoint: THREE.Vector3;
   /** collider spheres: palm + fingertip cluster */
@@ -588,8 +602,8 @@ interface Rt {
   holds: { left: Hold; right: Hold };
   hands: { left: HandRt; right: HandRt };
   ctrl: {
-    left: { pos: THREE.Vector3; prev: THREE.Vector3; vel: THREE.Vector3; seen: boolean; menuButtons: Set<number> };
-    right: { pos: THREE.Vector3; prev: THREE.Vector3; vel: THREE.Vector3; seen: boolean; menuButtons: Set<number> };
+    left: { pos: THREE.Vector3; prev: THREE.Vector3; vel: THREE.Vector3; quat: THREE.Quaternion; seen: boolean; menuButtons: Set<number> };
+    right: { pos: THREE.Vector3; prev: THREE.Vector3; vel: THREE.Vector3; quat: THREE.Quaternion; seen: boolean; menuButtons: Set<number> };
   };
   pressQueue: Array<{ type: "begin" | "end"; side: HandSide }>;
   /** dedupes double press-begins (joint pinch + select event firing together) */
@@ -651,6 +665,9 @@ function makeHold(): Hold {
     anchorVel: new THREE.Vector3(),
     anchorSeen: false,
     cooldownUntil: 0,
+    rotPrevQuat: new THREE.Quaternion(),
+    rotPrevValid: false,
+    rotVel: new THREE.Vector3(),
     recent: null,
     recentUntil: 0,
     exit: false,
@@ -675,6 +692,8 @@ function makeHandRt(): HandRt {
       fwd: new THREE.Vector3(0, 0, -1),
       valid: false,
     },
+    handQuat: new THREE.Quaternion(),
+    handQuatValid: false,
     grabActive: false,
     grabPoint: new THREE.Vector3(),
     colPalm: { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), seen: false },
@@ -693,8 +712,8 @@ function makeRt(): Rt {
     holds: { left: makeHold(), right: makeHold() },
     hands: { left: makeHandRt(), right: makeHandRt() },
     ctrl: {
-      left: { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), seen: false, menuButtons: new Set<number>() },
-      right: { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), seen: false, menuButtons: new Set<number>() },
+      left: { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), quat: new THREE.Quaternion(), seen: false, menuButtons: new Set<number>() },
+      right: { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), quat: new THREE.Quaternion(), seen: false, menuButtons: new Set<number>() },
     },
     pressQueue: [],
     pressLatch: new Set<unknown>(),
@@ -1121,7 +1140,7 @@ function drawPaletteTexture(
   ctx.fillStyle = "rgba(148, 197, 224, 0.7)";
   ctx.font = "600 21px ui-monospace, SFMono-Regular, Menlo, monospace";
   ctx.textAlign = "left";
-  ctx.fillText("PINCH A SHAPE AND PULL IT OUT", 44, H - 58);
+  ctx.fillText("PINCH A SHAPE AND PULL IT OUT — TWIST YOUR WRIST TO TURN IT", 44, H - 58);
   ctx.fillStyle = "rgba(125, 211, 252, 0.5)";
   ctx.font = "500 19px ui-monospace, SFMono-Regular, Menlo, monospace";
   ctx.fillText("X · Y · A · B TOGGLES THIS WINDOW", 44, H - 30);
@@ -1417,6 +1436,8 @@ class Sandbox {
   particles: ParticleSystem;
   onEvent: (kind: SandboxEvent, at: THREE.Vector3, side?: HandSide) => void = () => undefined;
   onCount: (n: number) => void = () => undefined;
+  /** DEV trace of the last executed snap: "moving#id·face → target#id·face" */
+  lastSnapTrace = "";
   private seq = 0;
   private clusterSeq = 0;
 
@@ -1470,6 +1491,7 @@ class Sandbox {
       quat: quat ? quat.clone() : new THREE.Quaternion(),
       angVel: new THREE.Vector3(),
       mass: 1,
+      boundRadius: shape.bound,
       settleT: 0,
       scale: 1,
       tintIdx: 0,
@@ -1513,6 +1535,7 @@ class Sandbox {
       offQ: new THREE.Quaternion(),
       rOff: new THREE.Vector3(),
       rOffQ: new THREE.Quaternion(),
+      buried: shape.faces.map(() => false),
       group,
       fill,
       wire,
@@ -1539,6 +1562,47 @@ class Sandbox {
     part.wire.dispose();
   }
 
+  /**
+   * Recompute per-part buried-face flags + the cluster's bound radius
+   * (cluster-local, scale-free). A face is BURIED when another part of
+   * the same cluster carries an opposing face at the same spot — that
+   * seam is a weld, not a place a new part can snap to. Called whenever
+   * cluster membership changes (spawn, snap-merge, rip, clone).
+   */
+  private refreshClusterFaces(c: Cluster): void {
+    let bound = 0;
+    for (const p of c.parts) {
+      p.buried.fill(false);
+      const b = SHAPE_BY_ID.get(p.type)!.bound + p.off.length();
+      if (b > bound) bound = b;
+    }
+    c.boundRadius = bound;
+    if (c.parts.length < 2) return;
+    for (const P of c.parts) {
+      const PShape = SHAPE_BY_ID.get(P.type)!;
+      if (PShape.faces.length === 0) continue;
+      for (const Q of c.parts) {
+        if (Q === P) continue;
+        const QShape = SHAPE_BY_ID.get(Q.type)!;
+        if (QShape.faces.length === 0) continue;
+        for (let fi = 0; fi < PShape.faces.length; fi++) {
+          if (P.buried[fi]) continue;
+          const f = PShape.faces[fi];
+          this.sv1.copy(f.c).applyQuaternion(P.offQ).add(P.off); // local centre
+          this.sv2.copy(f.n).applyQuaternion(P.offQ); // local normal
+          for (const g of QShape.faces) {
+            this.sv3.copy(g.c).applyQuaternion(Q.offQ).add(Q.off);
+            this.sv4.copy(g.n).applyQuaternion(Q.offQ);
+            if (this.sv2.dot(this.sv4) > -0.86) continue; // not opposing
+            if (this.sv1.distanceTo(this.sv3) > 0.013) continue; // not the seam
+            P.buried[fi] = true;
+            break;
+          }
+        }
+      }
+    }
+  }
+
   clear(): void {
     while (this.parts.length) this.disposePart(this.parts[0]);
     this.clusters.length = 0;
@@ -1561,19 +1625,26 @@ class Sandbox {
     return best;
   }
 
-  /** Spring the held part's cluster toward the anchor; rip when yanked. */
+  /** Spring the held part's cluster toward the anchor; rip when yanked.
+   *  With `wrist` steering active the off-centre torque is skipped — the
+   *  wrist owns the build's orientation while it's held. `ripOK` false
+   *  (a snap candidate is live) defers the rip — the face magnet is
+   *  pulling the build toward its mate and must win over the tear-off;
+   *  a real yank leaves the capture zone and re-arms the rip next frame. */
   holdUpdate(
     dt: number,
     part: Part,
     anchor: THREE.Vector3,
     anchorVel: THREE.Vector3,
-    side: HandSide
+    side: HandSide,
+    wrist = false,
+    ripOK = true
   ): "held" | "ripped" {
     const c = part.cluster;
     this.partWorld(part, this.sv1, this.sq1);
     this.sv2.copy(anchor).sub(this.sv1); // stretch vector
     const stretch = this.sv2.length();
-    if (c.parts.length > 1 && stretch > RIP_DIST) {
+    if (ripOK && c.parts.length > 1 && stretch > RIP_DIST) {
       const dir = this.sv2.clone().normalize();
       this.ripPart(part, dir, anchorVel, side);
       return "ripped";
@@ -1590,10 +1661,12 @@ class Sandbox {
       .addScaledVector(this.sv2, HOLD_KP);
     if (this.sv4.length() > HOLD_MAX_ACC) this.sv4.setLength(HOLD_MAX_ACC);
     c.vel.addScaledVector(this.sv4, dt);
-    // torque from the off-centre pull point
-    this.sv3.copy(this.sv1).sub(c.pos);
-    this.sv2.copy(this.sv3).cross(this.sv4).multiplyScalar(0.25 / 0.006);
-    c.angVel.addScaledVector(this.sv2, dt);
+    if (!wrist) {
+      // torque from the off-centre pull point
+      this.sv3.copy(this.sv1).sub(c.pos);
+      this.sv2.copy(this.sv3).cross(this.sv4).multiplyScalar(0.25 / 0.006);
+      c.angVel.addScaledVector(this.sv2, dt);
+    }
     if (c.angVel.length() > MAX_ANG) c.angVel.setLength(MAX_ANG);
     return "held";
   }
@@ -1610,6 +1683,7 @@ class Sandbox {
     if (j >= 0) old.parts.splice(j, 1);
     old.mass = old.parts.length;
     old.vel.addScaledVector(dir, -0.35); // reaction kick on the rest
+    this.refreshClusterFaces(old); // the seam face is exposed again
     const fresh: Cluster = {
       id: ++this.clusterSeq,
       parts: [part],
@@ -1622,6 +1696,7 @@ class Sandbox {
         (Math.random() - 0.5) * 1.5
       ),
       mass: 1,
+      boundRadius: SHAPE_BY_ID.get(part.type)!.bound,
       settleT: 0,
       scale: old.scale,
       tintIdx: old.tintIdx,
@@ -1666,6 +1741,7 @@ class Sandbox {
         (Math.random() - 0.5) * 0.8
       ),
       mass: c.parts.length,
+      boundRadius: c.boundRadius,
       settleT: 0,
       scale: c.scale,
       tintIdx: c.tintIdx,
@@ -1711,6 +1787,7 @@ class Sandbox {
         offQ: p.offQ.clone(),
         rOff: p.off.clone(),
         rOffQ: p.offQ.clone(),
+        buried: p.buried.slice(),
         group,
         fill,
         wire,
@@ -1725,6 +1802,7 @@ class Sandbox {
       this.parts.push(np);
     }
     this.clusters.push(fresh);
+    this.refreshClusterFaces(fresh);
     this.onCount(this.parts.length);
     this.onEvent("clone", pos, side);
     return fresh;
@@ -1836,56 +1914,69 @@ class Sandbox {
   }
 
   /**
-   * Best face-pair snap candidate for `part` against every other cluster.
-   * Also writes snap-proximity glow onto near target parts.
+   * Best face-pair snap candidate for the held `part`'s WHOLE cluster
+   * against every other cluster — every FREE face of every part on both
+   * sides. Welded (buried) faces are skipped: you always build outward
+   * from real, exposed faces, so a cube brought to the left of the left
+   * cube lands beside it, not inside the first seam it passes. Also
+   * writes snap-proximity glow onto near target parts.
    */
   snapSearch(part: Part, tight: boolean): SnapCandidate | null {
-    const mShape = SHAPE_BY_ID.get(part.type)!;
-    if (mShape.faces.length === 0) return null;
-    if (part.cluster.dying) return null;
-    // a freshly ripped part must fly clear before it can snap again
-    if (performance.now() < part.snapCooldownUntil) return null;
     const mc = part.cluster;
-    // moving part world transform
-    const mp = this.sv1;
-    const mq = this.sq1;
-    this.partWorld(part, mp, mq);
-    let best: SnapCandidate | null = null;
+    if (mc.dying) return null;
     const maxLat = tight ? SNAP_TIGHT_LAT : SNAP_LAT;
     const maxAlong = tight ? SNAP_TIGHT_ALONG : SNAP_ALONG;
-    let bestScore = maxLat * 2 + maxAlong;
-    for (const tc of this.clusters) {
-      if (tc === mc) continue;
-      if (tc.dying) continue;
-      for (const t of tc.parts) {
-        const tShape = SHAPE_BY_ID.get(t.type)!;
-        if (tShape.faces.length === 0) continue;
-        const tp = this.sv2;
-        const tq = this.sq2;
-        this.partWorld(t, tp, tq);
-        for (const tf of tShape.faces) {
-          // target face world centre + normal (sv3/sv4 persist over mf loop)
-          const tfc = this.sv3.copy(tf.c).multiplyScalar(tc.scale).applyQuaternion(tq).add(tp);
-          const tfn = this.sv4.copy(tf.n).applyQuaternion(tq);
-          for (const mf of mShape.faces) {
-            const mfc = this.sv5.copy(mf.c).multiplyScalar(mc.scale).applyQuaternion(mq).add(mp);
-            const mfn = this.sv6.copy(mf.n).applyQuaternion(mq);
-            const dot = mfn.dot(tfn);
-            if (dot > SNAP_DOT) continue;
-            const d = this.sv7.copy(mfc).sub(tfc);
-            const along = d.dot(tfn);
-            const latSq = Math.max(0, d.lengthSq() - along * along);
-            const lat = Math.sqrt(latSq);
-            // proximity glow even when not accepted
-            if (dot < -0.5 && Math.abs(along) < 0.12 && lat < 0.085) {
-              const prox = 1 - lat / 0.085;
-              if (prox > t.glowTarget) t.glowTarget = prox;
-            }
-            if (Math.abs(along) > maxAlong || lat > maxLat) continue;
-            const score = lat * 2.2 + Math.abs(along) + (1 + dot) * 0.35;
-            if (score < bestScore) {
-              best = { moving: part, target: t, mf, tf, score, lat, along };
-              bestScore = score;
+    let best: SnapCandidate | null = null;
+    let bestScore = maxLat * 2.2 + maxAlong;
+    const nowMs = performance.now();
+    // reach of any of my faces past the cluster origin
+    const reach = mc.boundRadius * mc.scale + maxAlong + 0.02;
+    for (const mp of mc.parts) {
+      // a freshly ripped part must fly clear before it can snap again
+      if (nowMs < mp.snapCooldownUntil) continue;
+      const mShape = SHAPE_BY_ID.get(mp.type)!;
+      if (mShape.faces.length === 0) continue;
+      const mpPos = this.sv1;
+      const mpQuat = this.sq1;
+      this.partWorld(mp, mpPos, mpQuat);
+      for (const tc of this.clusters) {
+        if (tc === mc) continue;
+        if (tc.dying) continue;
+        if (tc.pos.distanceTo(mc.pos) > reach + tc.boundRadius * tc.scale) continue;
+        for (const t of tc.parts) {
+          const tShape = SHAPE_BY_ID.get(t.type)!;
+          if (tShape.faces.length === 0) continue;
+          const tp = this.sv2;
+          const tq = this.sq2;
+          this.partWorld(t, tp, tq);
+          for (let tfi = 0; tfi < tShape.faces.length; tfi++) {
+            if (t.buried[tfi]) continue; // welded seam — not a target
+            const tf = tShape.faces[tfi];
+            // target face world centre + normal (sv3/sv4 persist over mf loop)
+            const tfc = this.sv3.copy(tf.c).multiplyScalar(tc.scale).applyQuaternion(tq).add(tp);
+            const tfn = this.sv4.copy(tf.n).applyQuaternion(tq);
+            for (let mfi = 0; mfi < mShape.faces.length; mfi++) {
+              if (mp.buried[mfi]) continue; // my own seam can't reach out
+              const mf = mShape.faces[mfi];
+              const mfc = this.sv5.copy(mf.c).multiplyScalar(mc.scale).applyQuaternion(mpQuat).add(mpPos);
+              const mfn = this.sv6.copy(mf.n).applyQuaternion(mpQuat);
+              const dot = mfn.dot(tfn);
+              if (dot > SNAP_DOT) continue;
+              const d = this.sv7.copy(mfc).sub(tfc);
+              const along = d.dot(tfn);
+              const latSq = Math.max(0, d.lengthSq() - along * along);
+              const lat = Math.sqrt(latSq);
+              // proximity glow even when not accepted
+              if (dot < -0.5 && Math.abs(along) < 0.12 && lat < 0.085) {
+                const prox = 1 - lat / 0.085;
+                if (prox > t.glowTarget) t.glowTarget = prox;
+              }
+              if (Math.abs(along) > maxAlong || lat > maxLat) continue;
+              const score = lat * 2.2 + Math.abs(along) + (1 + dot) * 0.35;
+              if (score < bestScore) {
+                best = { moving: mp, target: t, mf, tf, score, lat, along };
+                bestScore = score;
+              }
             }
           }
         }
@@ -1902,6 +1993,7 @@ class Sandbox {
     const mc = m.cluster;
     const tc = t.cluster;
     if (mc === tc) return false;
+    this.lastSnapTrace = `#${m.id}·${this.faceName(m.type, cand.mf.n)} → #${t.id}·${this.faceName(t.type, cand.tf.n)}`;
     const mShape = SHAPE_BY_ID.get(m.type)!;
     // world transforms
     const mp = this.sv1.clone();
@@ -1943,22 +2035,28 @@ class Sandbox {
       .copy(mPos)
       .sub(tfc)
       .sub(this.sv5.copy(mp).sub(tfc).applyQuaternion(R));
-    // tc-frame inverse rotation (persist)
-    const invTQ = tq.clone().invert();
+    // CLUSTER-frame inverse rotation — parts store off/offQ relative to the
+    // cluster body (partWorld: c.pos + off·scale·c.quat), NOT relative to
+    // the grabbed target part. Using the target part's pose here displaced
+    // every snap onto an off-origin part by that part's own offset — parts
+    // landed co-located (clipping) instead of flush beside it.
+    const invCQ = tc.quat.clone().invert();
+    // the snap burst point must survive refreshClusterFaces (sv3 scratch)
+    const snapAt = tfc.clone();
     const oldMass = tc.mass;
     const movMass = mc.mass;
     for (const p of mc.parts) {
       const pPos = this.sv5.clone();
       const pQuat = this.sq3.clone();
       this.partWorld(p, pPos, pQuat);
-      // old world pose in tc frame (settle "from")
-      const fromOff = pPos.clone().sub(tp).applyQuaternion(invTQ).divideScalar(tc.scale);
-      const fromOffQ = invTQ.clone().multiply(pQuat);
+      // old world pose in the CLUSTER frame (settle "from")
+      const fromOff = pPos.clone().sub(tc.pos).applyQuaternion(invCQ).divideScalar(tc.scale);
+      const fromOffQ = invCQ.clone().multiply(pQuat);
       // new world pose: rotate around pivot + delta
       const newPos = this.sv6.copy(pPos).sub(tfc).applyQuaternion(R).add(tfc).add(delta);
       const newQuat = R.clone().multiply(pQuat);
-      p.off.copy(newPos).sub(tp).applyQuaternion(invTQ).divideScalar(tc.scale);
-      p.offQ.copy(invTQ).multiply(newQuat);
+      p.off.copy(newPos).sub(tc.pos).applyQuaternion(invCQ).divideScalar(tc.scale);
+      p.offQ.copy(invCQ).multiply(newQuat);
       p.cluster = tc;
       p.settle = { fromOff, fromOffQ, t: SETTLE_MS };
     }
@@ -1966,6 +2064,7 @@ class Sandbox {
     mc.parts.length = 0;
     tc.parts.push(...movParts);
     tc.mass = tc.parts.length;
+    this.refreshClusterFaces(tc); // mark the new weld seam on both sides
     // conserve momentum (weighted), heavily damped — a fresh snap reads
     // as ONE solid piece, not two still arguing about velocity
     const wT = oldMass / (oldMass + movMass);
@@ -1975,8 +2074,19 @@ class Sandbox {
     tc.settleT = SETTLE_MS / 1000;
     const k = this.clusters.indexOf(mc);
     if (k >= 0) this.clusters.splice(k, 1);
-    this.onEvent("snap", tfc, side ?? undefined);
+    this.onEvent("snap", snapAt, side ?? undefined);
     return true;
+  }
+
+  /** DEV: human name for a face ("+X"…) from its local normal. */
+  private faceName(type: ShapeId, n: THREE.Vector3): string {
+    if (n.x > 0.7) return "+X";
+    if (n.x < -0.7) return "-X";
+    if (n.y > 0.7) return "+Y";
+    if (n.y < -0.7) return "-Y";
+    if (n.z > 0.7) return "+Z";
+    if (n.z < -0.7) return "-Z";
+    return SHAPE_BY_ID.get(type)?.twist ? "~" : "o";
   }
 
   /** Angle error (rad) between the moving part's local X/Z axes and the
@@ -2478,6 +2588,7 @@ function MrWorld({
       q1: new THREE.Quaternion(),
       q2: new THREE.Quaternion(),
       q3: new THREE.Quaternion(),
+      q4: new THREE.Quaternion(),
       m4: new THREE.Matrix4(),
       up: new THREE.Vector3(0, 1, 0),
       camRight: new THREE.Vector3(),
@@ -2581,6 +2692,8 @@ function MrWorld({
       if (!part) return;
       hold.part = null;
       hold.anchorSeen = false;
+      hold.rotPrevValid = false;
+      hold.rotVel.set(0, 0, 0);
       hold.cooldownUntil = performance.now() + (opts?.cooldown ?? 120);
       // the releasing hand's colliders must not shove the part it just
       // let go of (the pinch point sits inside it) — grace period long
@@ -2677,6 +2790,8 @@ function MrWorld({
             hold.part = part;
             hold.mode = grabMode;
             hold.anchorSeen = false;
+            hold.rotPrevValid = false;
+            hold.rotVel.set(0, 0, 0);
             hapticPulse(rt.sources[side], 0.6, 90);
           }
           return;
@@ -2691,6 +2806,8 @@ function MrWorld({
         hold.part = part;
         hold.mode = grabMode;
         hold.anchorSeen = false;
+        hold.rotPrevValid = false;
+        hold.rotVel.set(0, 0, 0);
         part.cluster.summon = null; // caught a summoned build
         part.cluster.stabT = 0;
         mrAudio.grab();
@@ -2757,6 +2874,8 @@ function MrWorld({
           rt.holds.right.part = part;
           rt.holds.right.mode = "mouse";
           rt.holds.right.anchorSeen = false;
+          rt.holds.right.rotPrevValid = false;
+          rt.holds.right.rotVel.set(0, 0, 0);
         }
         return;
       }
@@ -2778,6 +2897,8 @@ function MrWorld({
       rt.holds.right.part = bestPart;
       rt.holds.right.mode = "mouse";
       rt.holds.right.anchorSeen = false;
+      rt.holds.right.rotPrevValid = false;
+      rt.holds.right.rotVel.set(0, 0, 0);
       mrAudio.grab();
     }
   }, [camera, previewInput, raySphereDist, rt, tmp]);
@@ -3260,8 +3381,38 @@ function MrWorld({
               const flen = tmp.v4.length();
               if (flen > 1e-5) h.palm.fwd.copy(tmp.v4).multiplyScalar(1 / flen);
               h.palm.valid = true;
+
+              // rigid hand frame for wrist-follow rotation: x across the
+              // knuckle row (index→pinky), z along the hand (wrist→middle
+              // knuckle), y completes a right-handed basis. Metacarpals
+              // barely move relative to each other, so this frame is
+              // stable through pinches and fists.
+              tmp.v1.subVectors(pMcp, iMcp);
+              tmp.v2.subVectors(mMcp, wrist);
+              const zl = tmp.v2.length();
+              if (zl > 1e-5) {
+                tmp.v2.multiplyScalar(1 / zl);
+                tmp.v1.addScaledVector(tmp.v2, -tmp.v1.dot(tmp.v2));
+                const xl = tmp.v1.length();
+                if (xl > 1e-5) {
+                  tmp.v1.multiplyScalar(1 / xl);
+                  tmp.v3.crossVectors(tmp.v2, tmp.v1); // y = z × x
+                  if (tmp.v3.lengthSq() > 1e-8) {
+                    tmp.m4.makeBasis(tmp.v1, tmp.v3, tmp.v2);
+                    h.handQuat.setFromRotationMatrix(tmp.m4);
+                    h.handQuatValid = true;
+                  } else {
+                    h.handQuatValid = false;
+                  }
+                } else {
+                  h.handQuatValid = false;
+                }
+              } else {
+                h.handQuatValid = false;
+              }
             } else {
               h.palm.valid = false;
+              h.handQuatValid = false;
             }
 
             // fist (mean fingertip distance to palm centre)
@@ -3355,7 +3506,9 @@ function MrWorld({
                 const pose = frame.getPose(gs, refSpace);
                 if (pose) {
                   const p = pose.transform.position;
+                  const o = pose.transform.orientation;
                   cp.pos.set(p.x, p.y, p.z);
+                  cp.quat.set(o.x, o.y, o.z, o.w);
                   got = true;
                 }
               }
@@ -3371,6 +3524,7 @@ function MrWorld({
                   tmp.q1.set(o.x, o.y, o.z, o.w);
                   tmp.v1.set(0, 0, -0.12).applyQuaternion(tmp.q1);
                   cp.pos.set(p.x + tmp.v1.x, p.y + tmp.v1.y, p.z + tmp.v1.z);
+                  cp.quat.copy(tmp.q1);
                   got = true;
                 }
               } catch {
@@ -3405,6 +3559,7 @@ function MrWorld({
               h.point = false;
               h.open = false;
               h.palm.valid = false;
+              h.handQuatValid = false;
             }
           }
         });
@@ -4011,18 +4166,60 @@ function MrWorld({
           hold.anchor.copy(anchor);
           part.held = true;
           part.glowTarget = 1;
-          // the two-hand gesture drives the build directly — no spring
-          if (th.active && part.cluster === th.cluster) continue;
-          sandbox.holdUpdate(dt, part, hold.anchor, hold.anchorVel, side);
+          // the two-hand gesture drives the build directly — no spring, no wrist
+          if (th.active && part.cluster === th.cluster) {
+            hold.rotPrevValid = false; // re-latch on resume — no delta spike
+            continue;
+          }
+          // ---- wrist-follow: a held build tracks your wrist's rotation ----
+          // Rate control — the build's angular velocity steers toward the
+          // hand's angular velocity, so twisting your wrist turns the part
+          // and a still wrist calms it. Controllers read the grip pose,
+          // bare hands a rigid metacarpal frame.
+          let wristW: THREE.Vector3 | null = null;
+          if (hold.mode !== "mouse") {
+            const hq =
+              hold.mode === "controller"
+                ? rt.ctrl[side].seen
+                  ? rt.ctrl[side].quat
+                  : null
+                : rt.hands[side].handQuatValid
+                  ? rt.hands[side].handQuat
+                  : null;
+            if (hq) {
+              if (hold.rotPrevValid && dt > 1e-4) {
+                // Δ = qNow · qPrev⁻¹ → axis·angle / dt = hand ang-vel
+                tmp.q3.copy(hq).multiply(tmp.q4.copy(hold.rotPrevQuat).invert()).normalize();
+                const w = Math.min(1, Math.abs(tmp.q3.w));
+                const ang = 2 * Math.acos(w);
+                if (ang > 0.0015) {
+                  const s = Math.sqrt(Math.max(1e-10, 1 - w * w));
+                  tmp.v6.set(tmp.q3.x / s, tmp.q3.y / s, tmp.q3.z / s);
+                  tmp.v6.multiplyScalar(Math.min(8, ang / dt));
+                  hold.rotVel.lerp(tmp.v6, 0.55);
+                } else {
+                  hold.rotVel.multiplyScalar(0.72); // wrist still → settle
+                }
+                wristW = hold.rotVel;
+              }
+              hold.rotPrevQuat.copy(hq);
+              hold.rotPrevValid = true;
+            } else {
+              hold.rotPrevValid = false;
+            }
+          }
+          // snap candidate FIRST: its magnets steer below, and a live
+          // candidate defers the rip in holdUpdate (magnet > tear-off)
+          const cand = sandbox.snapSearch(part, false);
+          sandbox.holdUpdate(dt, part, hold.anchor, hold.anchorVel, side, wristW !== null, !cand);
           // snap while held: face magnets (position + rotation) pull the
           // part flush and square, then it clicks home the moment it's close
-          const cand = sandbox.snapSearch(part, false);
           if (cand) {
             sandbox.partWorld(cand.target, tmp.v1, tmp.q1);
-            sandbox.partWorld(part, tmp.v2, tmp.q2);
+            sandbox.partWorld(cand.moving, tmp.v2, tmp.q2);
             // world face centres + normals
             const tcScale = cand.target.cluster.scale;
-            const mcScale = part.cluster.scale;
+            const mcScale = cand.moving.cluster.scale;
             tmp.v3
               .copy(cand.tf.c)
               .multiplyScalar(tcScale)
@@ -4037,12 +4234,14 @@ function MrWorld({
             tmp.v5.copy(tmp.v3).sub(tmp.v4);
             const dl = tmp.v5.length();
             if (dl > 0.002) {
-              part.cluster.vel.addScaledVector(
+              cand.moving.cluster.vel.addScaledVector(
                 tmp.v5.multiplyScalar(1 / dl),
                 Math.min(2.4, MAGNET_ACC * dt)
               );
             }
-            // rotational magnet: angular velocity toward flush alignment
+            // rotational magnet: angular velocity toward flush alignment,
+            // blended with the wrist by proximity — far out your wrist owns
+            // the part, up close the magnet squares it for the click
             tmp.v6.copy(cand.mf.n).applyQuaternion(tmp.q2); // moving face normal
             tmp.v7.copy(cand.tf.n).applyQuaternion(tmp.q1); // target face normal
             tmp.v8.copy(tmp.v7).negate(); // wanted direction for mfn
@@ -4053,10 +4252,17 @@ function MrWorld({
               const s = Math.sqrt(Math.max(1e-10, 1 - w * w));
               tmp.v6.set(tmp.q3.x / s, tmp.q3.y / s, tmp.q3.z / s); // axis
               tmp.v6.multiplyScalar(Math.min(6, angErr * ROT_MAG));
-              part.cluster.angVel.lerp(tmp.v6, Math.min(1, dampK(12, dt)));
             } else {
-              part.cluster.angVel.multiplyScalar(1 - Math.min(1, dampK(12, dt)));
+              tmp.v6.set(0, 0, 0);
             }
+            const prox =
+              Math.max(0, 1 - cand.lat / SNAP_LAT) *
+              Math.max(0, 1 - Math.abs(cand.along) / SNAP_ALONG);
+            const kMag = wristW ? 0.35 + 0.65 * prox : 1;
+            if (wristW) {
+              tmp.v6.multiplyScalar(kMag).addScaledVector(wristW, 1 - kMag);
+            }
+            part.cluster.angVel.lerp(tmp.v6, Math.min(1, dampK(12, dt)));
             if (
               cand.lat < SNAP_ENGAGE_LAT &&
               Math.abs(cand.along) < SNAP_ENGAGE_ALONG &&
@@ -4066,6 +4272,9 @@ function MrWorld({
               releaseHold(side, { silent: true, cooldown: 350, noImpulse: true });
               continue;
             }
+          } else if (wristW) {
+            // no snap candidate: pure wrist-follow (a still wrist settles it)
+            part.cluster.angVel.lerp(wristW, Math.min(1, dampK(12, dt)));
           }
           // ---- shake-to-recolor ----
           const sh = hold.shake;
@@ -4328,13 +4537,25 @@ function MrWorld({
             .multiplyScalar(pal.scale)
             .applyQuaternion(pal.quat)
             .add(pal.pos);
-          const partsList: Array<{ id: number; type: string; pos: [number, number, number] }> =
-            [];
+          const partsList: Array<{
+            id: number;
+            type: string;
+            cluster: number;
+            buried: number;
+            buriedFaces: string;
+            pos: [number, number, number];
+          }> = [];
           for (const p of sandbox.parts) {
             sandbox.partWorld(p, tmp.v1, tmp.q1);
             partsList.push({
               id: p.id,
               type: p.type,
+              cluster: p.cluster.id,
+              buried: p.buried.reduce((n, b) => n + (b ? 1 : 0), 0),
+              buriedFaces: p.buried
+                .map((b, i) => (b ? ["+X", "-X", "+Y", "-Y", "+Z", "-Z"][i] : null))
+                .filter(Boolean)
+                .join("|"),
               pos: [tmp.v1.x, tmp.v1.y, tmp.v1.z],
             });
           }
@@ -4346,6 +4567,7 @@ function MrWorld({
             dying: !!c.dying,
             summoned: !!c.summon,
             pos: [c.pos.x, c.pos.y, c.pos.z] as [number, number, number],
+            quat: [c.quat.x, c.quat.y, c.quat.z, c.quat.w] as [number, number, number, number],
             vel: [
               +c.vel.x.toFixed(3),
               +c.vel.y.toFixed(3),
@@ -4399,6 +4621,7 @@ function MrWorld({
             lastTumbleAt: rt.last.tumble,
             lastYeetAt: rt.last.yeet,
             grabTrace: rt.grabTrace,
+            snapTrace: sandbox.lastSnapTrace,
             diag: {
               frame: mrBridge.diag.frame,
               fps: mrBridge.diag.fps,

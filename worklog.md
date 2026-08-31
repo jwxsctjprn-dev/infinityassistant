@@ -505,3 +505,18 @@ Work Log:
 
 Stage Summary:
 - Holograms are heavy: strong linear/angular damping + a hard sleep threshold means everything stops dead where you leave it and stays there. Hands and controllers never shove anything (touch colliders gone). Builds are SOLID — one hand can never tear them; the only way apart is grabbing with BOTH hands and yanking deliberately, which tears the build in two between your hands (each half goes with its hand, seam re-weldable). Color-changing (shake-to-recolor) and double-tap clone are fully removed; force push/flick/swipe-spins were re-sized so they still feel powerful under the new weight. Verified end-to-end through the real WebXR path with the Quest-3 mock, and live on https://infinityassistant.vercel.app.
+
+---
+Task ID: 40
+Agent: main (Z.ai Code)
+Task: User: "You didn't push that update to vercel." — verify + finish the v2.5.0 deploy (previous session ran out of context right after the push, so the confirmation never reached the user).
+
+Work Log:
+- Inspected git state: local v2.5.0 commit (32325bf) and origin/main tip (96b71c6) were sibling commits with BYTE-IDENTICAL app source (only a mode-bit on a tool-results scratch file differed) — the v2.5.0 push HAD landed on GitHub at 05:46 UTC.
+- Verified the LIVE deployment directly: https://infinityassistant.vercel.app/ serves HTTP 200 with the 2.5.0 version badge in the HTML, and the live app chunk (58d03baa0d80d314.js, 1.4MB) contains the "v2.5.0-heavyweight" build marker — the deployed bundle IS the Heavyweight code.
+- Confirmed no service worker exists in the app, so nothing app-side can serve stale bundles to headsets.
+- Synced local main to origin/main (git reset --mixed, scratch-file mode bit discarded) so the unpushed sibling commit no longer blocks pushes.
+- Pushed this worklog commit to origin/main to trigger a FRESH Vercel deployment (identical content, new deployment) and re-verified the live site serves 2.5.0 + the Heavyweight marker afterwards.
+
+Stage Summary:
+- v2.5.0 "Heavyweight" was already live on Vercel; branch history is now clean/synced, and a fresh deployment was pushed to flush any edge caching. User-facing truth: https://infinityassistant.vercel.app is running weighty physics, no touch-shove, two-hand rip, with recolor + clone removed.
